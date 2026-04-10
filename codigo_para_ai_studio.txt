@@ -1,0 +1,4441 @@
+Este arquivo contem o codigo fonte do projeto React da landing page.
+
+
+
+=======================================================
+Arquivo: .env.example
+=======================================================
+
+
+
+# Supabase (Banco de Dados em Nuvem)
+# Crie um projeto em https://supabase.com
+# Vá em Project Settings -> API para pegar essas chaves
+SUPABASE_URL=https:/
+SUPABASE_ANON_KEY=eyJhbGci6ImFub24iLCJpYXQiOjE3NzI3NTA1NTYsImV4cCI6MjA4ODMyNjU1
+
+=======================================================
+Arquivo: .gitignore
+=======================================================
+
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+
+=======================================================
+Arquivo: api\auth\google\callback.ts
+=======================================================
+
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import { google } from 'googleapis';
+
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+export default async function (req: VercelRequest, res: VercelResponse) {
+  const { code, state } = req.query;
+
+  // Em um ambiente real, você verificaria o 'state' para prevenir ataques CSRF.
+  // Por simplicidade, estamos pulando essa verificação aqui.
+
+  try {
+    const { tokens } = await oauth2Client.getToken(code as string);
+    oauth2Client.setCredentials(tokens);
+
+    // Em um ambiente real, você salvaria os tokens (especialmente o refresh_token)
+    // em um banco de dados seguro associado ao seu usuário.
+    // Para este exemplo, vamos apenas enviar uma mensagem de sucesso.
+    console.log('Tokens recebidos:', tokens);
+
+    // Redireciona de volta para o frontend com uma mensagem de sucesso
+    // ou armazena os tokens e redireciona para o painel do cliente.
+    res.send(`
+      <html>
+        <head><title>Autenticação Google</title></head>
+        <body>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'GOOGLE_AUTH_SUCCESS', tokens: ${JSON.stringify(tokens)} }, '*');
+              window.close();
+            } else {
+              window.location.href = '/'; // Fallback
+            }
+          </script>
+          <p>Autenticação com Google Sheets bem-sucedida! Esta janela será fechada automaticamente.</p>
+        </body>
+      </html>
+    `);
+  } catch (error: any) {
+    console.error('Erro ao trocar código por tokens:', error.message);
+    res.status(500).send(`
+      <html>
+        <head><title>Erro de Autenticação</title></head>
+        <body>
+          <p>Erro ao autenticar com Google Sheets: ${error.message}</p>
+          <button onclick="window.close()">Fechar</button>
+        </body>
+      </html>
+    `);
+  }
+}
+
+
+=======================================================
+Arquivo: api\auth\google.ts
+=======================================================
+
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import { google } from 'googleapis';
+import { v4 as uuidv4 } from 'uuid';
+
+const scopes = [
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+];
+
+export default async function (req: VercelRequest, res: VercelResponse) {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const redirectUri = process.env.GOOGLE_REDIRECT_URI || 'https://ais-dev-wuwbx7zohkup3yeki2ewpk-184778435493.us-east1.run.app/api/auth/google/callback';
+  
+  if (!clientId || !clientSecret) {
+    console.error('ERRO: GOOGLE_CLIENT_ID ou GOOGLE_CLIENT_SECRET não configurados nos Secrets.');
+    return res.status(500).send('Erro de configuração: Credenciais do Google ausentes no painel de Secrets.');
+  }
+
+  const oauth2Client = new google.auth.OAuth2(
+    clientId,
+    clientSecret,
+    redirectUri
+  );
+
+  console.log('Iniciando OAuth para Client ID:', clientId.substring(0, 10) + '...');
+  
+  const state = uuidv4();
+
+  const authorizationUrl = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: scopes,
+    include_granted_scopes: true,
+    prompt: 'consent',
+    state: state,
+    client_id: clientId, // Passando explicitamente aqui
+    redirect_uri: redirectUri
+  });
+
+  res.redirect(authorizationUrl);
+}
+
+
+=======================================================
+Arquivo: api\clients.ts
+=======================================================
+
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import { createClient } from '@supabase/supabase-js';
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const { method, body } = req;
+  
+  try {
+    const supabaseUrl = (process.env.SUPABASE_URL_CERTA || '').trim();
+    const supabaseKey = (process.env.SUPABASE_ANON_KEY_CERTA || '').trim();
+
+    if (!supabaseUrl || !supabaseUrl.startsWith('http')) {
+      throw new Error('A URL do Supabase não está configurada corretamente no painel de ambiente. Verifique se ela começa com https://');
+    }
+    if (!supabaseKey) {
+      throw new Error('A chave (Anon Key) do Supabase não está configurada.');
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    if (method === 'GET') {
+      const { data, error } = await supabase
+        .from('clients')
+        .select('*')
+        .order('created_at', { ascending: false });
+        
+      if (error) throw error;
+      return res.status(200).json(data || []);
+    } 
+    else if (method === 'POST') {
+      const name = body.name?.trim();
+      const email = body.email?.trim();
+      const password = body.password?.trim();
+      const business_name = body.business_name?.trim();
+      
+      const { data, error } = await supabase
+        .from('clients')
+        .insert([{ name, email, password, business_name }])
+        .select();
+        
+      if (error) throw error;
+      return res.status(201).json({ success: true, client: data[0] });
+    }
+    else if (method === 'PUT') {
+      const { id, name, email, password, business_name } = body;
+      
+      const updateData: any = {};
+      if (name) updateData.name = name;
+      if (email) updateData.email = email;
+      if (password) updateData.password = password;
+      if (business_name) updateData.business_name = business_name;
+      
+      const { data, error } = await supabase
+        .from('clients')
+        .update(updateData)
+        .eq('id', id)
+        .select();
+        
+      if (error) throw error;
+      return res.status(200).json({ success: true, client: data[0] });
+    }
+    
+    return res.status(405).json({ error: 'Method not allowed' });
+  } catch (error: any) {
+    console.error('Supabase Error:', JSON.stringify(error, null, 2));
+    const debugInfo = {
+      urlSet: !!process.env.SUPABASE_URL_CERTA,
+      urlPrefix: process.env.SUPABASE_URL_CERTA ? process.env.SUPABASE_URL_CERTA.substring(0, 8) : 'none',
+      keySet: !!process.env.SUPABASE_ANON_KEY_CERTA
+    };
+    return res.status(500).json({ 
+      error: error.message,
+      debug: debugInfo
+    });
+  }
+}
+
+
+=======================================================
+Arquivo: api\leads.ts
+=======================================================
+
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import { createClient } from '@supabase/supabase-js';
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const { method, query, body } = req;
+  
+  // Extrai o ID da URL se existir
+  const id = query.id || req.url?.split('/').pop();
+
+  try {
+    const supabaseUrl = (process.env.SUPABASE_URL_CERTA || '').trim();
+    const supabaseKey = (process.env.SUPABASE_ANON_KEY_CERTA || '').trim();
+
+    if (!supabaseUrl || !supabaseUrl.startsWith('http')) {
+      throw new Error('A URL do Supabase não está configurada corretamente no painel de ambiente. Verifique se ela começa com https://');
+    }
+    if (!supabaseKey) {
+      throw new Error('A chave (Anon Key) do Supabase não está configurada.');
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    if (method === 'GET') {
+      const { data, error } = await supabase
+        .from('leads')
+        .select('*')
+        .order('created_at', { ascending: false });
+        
+      if (error) throw error;
+      return res.status(200).json(data || []);
+    } 
+    else if (method === 'POST') {
+      const { name, instagram, whatsapp } = body;
+      const { data, error } = await supabase
+        .from('leads')
+        .insert([{ name, instagram, whatsapp }])
+        .select();
+        
+      if (error) throw error;
+      return res.status(201).json({ success: true, lead: data[0] });
+    }
+    else if (method === 'DELETE') {
+      if (!id || id === 'leads') return res.status(400).json({ error: 'ID missing' });
+      
+      const { error } = await supabase
+        .from('leads')
+        .delete()
+        .eq('id', id);
+        
+      if (error) throw error;
+      return res.status(200).json({ success: true });
+    }
+    else if (method === 'PUT') {
+      if (!id || id === 'leads') return res.status(400).json({ error: 'ID missing' });
+      const { name, instagram, whatsapp, status, verdict, feedback } = body;
+      
+      const { error } = await supabase
+        .from('leads')
+        .update({ name, instagram, whatsapp, status, verdict, feedback })
+        .eq('id', id);
+        
+      if (error) throw error;
+      return res.status(200).json({ success: true });
+    }
+    
+    return res.status(405).json({ error: 'Method not allowed' });
+  } catch (error: any) {
+    console.error('Supabase Error:', JSON.stringify(error, null, 2));
+    const debugInfo = {
+      urlSet: !!process.env.SUPABASE_URL_CERTA,
+      urlPrefix: process.env.SUPABASE_URL_CERTA ? process.env.SUPABASE_URL_CERTA.substring(0, 8) : 'none',
+      keySet: !!process.env.SUPABASE_ANON_KEY_CERTA,
+      errorName: error?.name,
+      errorCode: error?.code,
+      errorHint: error?.hint,
+      errorDetails: error?.details
+    };
+    return res.status(500).json({ 
+      error: error.message || 'Erro desconhecido ao conectar com o banco de dados',
+      debug: debugInfo
+    });
+  }
+}
+
+
+=======================================================
+Arquivo: api\login.ts
+=======================================================
+
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import { createClient } from '@supabase/supabase-js';
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const email = req.body.email?.trim();
+  const password = req.body.password?.trim();
+
+  try {
+    const supabaseUrl = (process.env.SUPABASE_URL_CERTA || process.env.SUPABASE_URL || '').trim();
+    const supabaseKey = (process.env.SUPABASE_ANON_KEY_CERTA || process.env.SUPABASE_ANON_KEY || '').trim();
+    
+    if (!supabaseUrl || !supabaseKey) {
+      return res.status(500).json({ error: 'Configuração do banco de dados ausente.' });
+    }
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    // 1. Verifica se é o Administrador (Lucas Constantino)
+    if (email === 'brtreino@gmail.com' && (password === 'Escroto12.' || password === '123456')) {
+      return res.status(200).json({ 
+        success: true, 
+        role: 'admin', 
+        user: { name: 'Lucas Constantino', email } 
+      });
+    }
+
+    // 2. Verifica se é um Cliente cadastrado no banco de dados
+    const { data: clients, error } = await supabase
+      .from('clients')
+      .select('id, name, email, password, business_name')
+      .ilike('email', email); // Case-insensitive email search
+      
+    if (error) {
+      console.error('Supabase Error during login:', error);
+      return res.status(500).json({ error: `Erro no banco: ${error.message}` });
+    }
+    
+    const client = clients && clients.length > 0 ? clients[0] : null;
+    
+    if (!client) {
+      return res.status(401).json({ error: 'E-mail não encontrado no sistema.' });
+    }
+
+    if (client.password !== password) {
+      return res.status(401).json({ error: 'Senha incorreta.' });
+    }
+    
+    // Remove a senha antes de retornar
+    delete client.password;
+
+    return res.status(200).json({ 
+      success: true, 
+      role: 'client', 
+      user: client 
+    });
+  } catch (error: any) {
+    console.error('Erro no login:', error);
+    return res.status(500).json({ error: 'Erro interno no servidor de autenticação.' });
+  }
+}
+
+
+=======================================================
+Arquivo: api\sheets\save-lead.ts
+=======================================================
+
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import { google } from 'googleapis';
+
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+// Em um ambiente real, os tokens seriam carregados de um armazenamento seguro (DB).
+// Para este exemplo, vamos simular que temos os tokens.
+// Você precisará autenticar uma vez para obter um refresh_token e armazená-lo.
+// O access_token pode ser gerado a partir do refresh_token.
+let storedTokens = {
+  refresh_token: process.env.GOOGLE_REFRESH_TOKEN, // Você precisará obter e definir isso
+  // access_token: '...', // Será gerado
+  // expiry_date: '...', // Será gerado
+};
+
+export default async function (req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Método não permitido' });
+  }
+
+  const { name, instagram, whatsapp } = req.body;
+
+  if (!name || !instagram || !whatsapp) {
+    return res.status(400).json({ error: 'Todos os campos são obrigatórios' });
+  }
+
+  try {
+    // Define as credenciais com o refresh token
+    oauth2Client.setCredentials({
+      refresh_token: storedTokens.refresh_token,
+    });
+
+    // Garante que temos um access token válido
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    oauth2Client.setCredentials(credentials);
+
+    const sheets = google.sheets({
+      version: 'v4',
+      auth: oauth2Client,
+    });
+
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID; // ID da sua planilha
+    const range = 'Leads!A:D'; // Nome da aba e colunas
+
+    const values = [
+      [new Date().toISOString(), name, instagram, whatsapp],
+    ];
+
+    const resource = {
+      values,
+    };
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range,
+      valueInputOption: 'RAW',
+      requestBody: resource,
+    });
+
+    console.log('Lead salvo no Google Sheets com sucesso!');
+    res.status(200).json({ success: true, message: 'Lead salvo no Sheets' });
+  } catch (error: any) {
+    console.error('Erro ao salvar lead no Google Sheets:', error.message);
+    res.status(500).json({ error: 'Erro ao salvar lead no Google Sheets', details: error.message });
+  }
+}
+
+
+=======================================================
+Arquivo: api\supabase.ts
+=======================================================
+
+import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const supabaseUrl = (process.env.SUPABASE_URL_CERTA || process.env.SUPABASE_URL || '').trim();
+const supabaseKey = (process.env.SUPABASE_ANON_KEY_CERTA || process.env.SUPABASE_ANON_KEY || '').trim();
+
+if (!supabaseUrl || supabaseUrl === 'sua_url_do_supabase' || !supabaseUrl.startsWith('http')) {
+  console.error('ERRO CRÍTICO: SUPABASE_URL não está configurada corretamente.');
+}
+
+export const supabase = createClient(
+  supabaseUrl || 'https://placeholder.supabase.co', 
+  supabaseKey || 'placeholder'
+);
+
+
+=======================================================
+Arquivo: gerar_texto_ai_studio.cjs
+=======================================================
+
+const fs = require('fs');
+const path = require('path');
+
+const EXCLUDED_DIRS = ['node_modules', 'dist', '.git', '.gemini', '.vite'];
+const EXCLUDED_FILES = ['package-lock.json', 'gerar_texto_ai_studio.js', 'codigo_para_ai_studio.txt', 'projeto_para_ai_studio.zip'];
+const EXCLUDED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.zip', '.mp4', '.webm'];
+
+function walkDir(dir, callback) {
+  fs.readdirSync(dir).forEach(f => {
+    let dirPath = path.join(dir, f);
+    let isDirectory = fs.statSync(dirPath).isDirectory();
+    if (isDirectory) {
+      if (!EXCLUDED_DIRS.includes(f)) {
+        walkDir(dirPath, callback);
+      }
+    } else {
+      const ext = path.extname(f).toLowerCase();
+      if (!EXCLUDED_FILES.includes(f) && !EXCLUDED_EXTENSIONS.includes(ext)) {
+        callback(dirPath);
+      }
+    }
+  });
+}
+
+let result = 'Este arquivo contem o codigo fonte do projeto React da landing page.\n\n';
+
+try {
+  walkDir(__dirname, (filePath) => {
+    const relativePath = path.relative(__dirname, filePath);
+    result += `\n\n=======================================================\n`;
+    result += `Arquivo: ${relativePath}\n`;
+    result += `=======================================================\n\n`;
+    
+    try {
+      result += fs.readFileSync(filePath, 'utf8');
+    } catch (e) {
+      result += `[Erro ao ler o arquivo]\n`;
+    }
+  });
+
+  fs.writeFileSync(path.join(__dirname, 'codigo_para_ai_studio.txt'), result);
+  console.log('Arquivo codigo_para_ai_studio.txt gerado com sucesso!');
+} catch (error) {
+  console.error('Erro ao gerar arquivo:', error);
+}
+
+
+=======================================================
+Arquivo: index.html
+=======================================================
+
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- SEO -->
+    <title>Lucas Constantino — Gestor de Tráfego de Alta Performance</title>
+    <meta name="description" content="Vendas e fechamentos de contratos diários para operações de elite. Lucro líquido, escala previsível e ROI comprovado com gestão de tráfego pago premium." />
+    <meta name="keywords" content="gestor de tráfego, tráfego pago, Lucas Constantino, vendas, contratos, ROI, performance, marketing digital" />
+    <meta name="author" content="Lucas Constantino" />
+    <meta name="robots" content="index, follow" />
+    
+    <!-- Open Graph -->
+    <meta property="og:title" content="Lucas Constantino — Gestor de Tráfego de Alta Performance" />
+    <meta property="og:description" content="Vendas e fechamentos diários para operações de elite. Lucro líquido e escala previsível." />
+    <meta property="og:type" content="website" />
+    
+    <!-- Preconnect fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    
+    <!-- Theme -->
+    <meta name="theme-color" content="#080808" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
+
+=======================================================
+Arquivo: metadata.json
+=======================================================
+
+{
+  "name": "Gestor de trafego",
+  "description": "Uma landing page premium para agências de design e tecnologia focadas em IA.",
+  "requestFramePermissions": []
+}
+
+=======================================================
+Arquivo: package.json
+=======================================================
+
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^1.29.0",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@studio-freight/lenis": "^1.0.42",
+    "@supabase/supabase-js": "^2.97.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "express-session": "^1.19.0",
+    "framer-motion": "^12.38.0",
+    "googleapis": "^171.4.0",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "next-themes": "^0.4.6",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^3.7.0",
+    "tailwind-merge": "^3.5.0",
+    "three": "^0.183.2",
+    "uuid": "^13.0.0",
+    "vite": "^6.2.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@types/three": "^0.183.1",
+    "@vercel/node": "^5.6.7",
+    "autoprefixer": "^10.4.21",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
+
+
+=======================================================
+Arquivo: README.md
+=======================================================
+
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/df9d1dd0-2999-4ed3-b50f-77036a397bf8
+
+## Run Locally
+
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
+
+
+=======================================================
+Arquivo: server.ts
+=======================================================
+
+import express from "express";
+import { createServer as createViteServer } from "vite";
+import path from "path";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+import leadsApi from "./api/leads.js";
+import clientsApi from "./api/clients.js";
+import loginApi from "./api/login.js";
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(express.json());
+
+  // Registrar rotas da API manualmente para o ambiente de desenvolvimento
+  app.all("/api/login", (req, res) => loginApi(req as any, res as any));
+  
+  app.all("/api/leads", (req, res) => leadsApi(req as any, res as any));
+  app.all("/api/leads/:id", (req, res) => {
+    req.query.id = req.params.id;
+    leadsApi(req as any, res as any);
+  });
+  
+  app.all("/api/clients", (req, res) => clientsApi(req as any, res as any));
+  app.all("/api/clients/:id", (req, res) => {
+    req.query.id = req.params.id;
+    clientsApi(req as any, res as any);
+  });
+
+  // Middleware do Vite para desenvolvimento
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.join(__dirname, "dist")));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Servidor Express rodando em http://localhost:${PORT}`);
+  });
+}
+
+startServer();
+
+
+=======================================================
+Arquivo: src\App.tsx
+=======================================================
+
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect } from "react";
+import { GoogleGenAI } from "@google/genai";
+import { motion, AnimatePresence } from "motion/react";
+import { 
+  ResponsiveContainer, 
+  AreaChart, 
+  Area, 
+  XAxis, 
+  YAxis, 
+  Tooltip, 
+  CartesianGrid 
+} from "recharts";
+import { 
+  ArrowRight, 
+  Zap, 
+  Shield, 
+  Cpu, 
+  Globe, 
+  Layers, 
+  ChevronRight,
+  Github,
+  Twitter,
+  Linkedin,
+  Star,
+  CheckCircle2,
+  Lock,
+  ArrowUpRight,
+  Camera,
+  User,
+  Sparkles,
+  X,
+  Send,
+  Instagram,
+  Phone,
+  Copy,
+  Check,
+  Trash2,
+  Edit,
+  Plus,
+  Users,
+  AlertCircle,
+  TrendingUp,
+  Megaphone
+} from "lucide-react";
+
+import RadialOrbitalTimelineDemo from "./components/RadialOrbitalTimelineDemo";
+import { DottedSurface } from "./components/DottedSurface";
+import { GreenSparks } from "./components/GreenSparks";
+import { ThemeProvider } from "next-themes";
+
+const fadeInUp = {
+  initial: { opacity: 0, y: 20 },
+  whileInView: { opacity: 1, y: 0 },
+  viewport: { once: true },
+  transition: { duration: 0.8, ease: [0.22, 1, 0.36, 1] }
+};
+
+const chartData = [
+  { month: "Mês 1", revenue: 12000 },
+  { month: "Mês 2", revenue: 28000 },
+  { month: "Mês 3", revenue: 45000 },
+  { month: "Mês 4", revenue: 82000 },
+  { month: "Mês 5", revenue: 115000 },
+  { month: "Mês 6", revenue: 158000 },
+];
+
+const CustomTooltip = ({ active, payload }: any) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-zinc-900 border border-white/10 p-4 rounded-xl shadow-2xl backdrop-blur-md">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-1">{payload[0].payload.month}</p>
+        <p className="text-emerald-500 font-bold text-lg">
+          R$ {payload[0].value.toLocaleString()}
+        </p>
+        <p className="text-[9px] text-zinc-600 uppercase tracking-tighter">Faturamento Gerado</p>
+      </div>
+    );
+  }
+  return null;
+};
+
+export default function App() {
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
+  const [statusQueryWhatsapp, setStatusQueryWhatsapp] = useState('');
+  const [leadStatus, setLeadStatus] = useState<any>(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [isLeadsModalOpen, setIsLeadsModalOpen] = useState(false);
+  const [activeDashboardTab, setActiveDashboardTab] = useState<'leads' | 'clients' | 'timeline'>('leads');
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [userRole, setUserRole] = useState<'admin' | 'client' | null>(null);
+  const [loggedClient, setLoggedClient] = useState<any>(null);
+  const [leads, setLeads] = useState<any[]>([]);
+  const [clients, setClients] = useState<any[]>([]);
+  const [loginData, setLoginData] = useState({ email: "", password: "" });
+  
+  const [editingLead, setEditingLead] = useState<any | null>(null);
+  const [editingClient, setEditingClient] = useState<any | null>(null);
+  const [isCreateClientOpen, setIsCreateClientOpen] = useState(false);
+  const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState<string | null>(null);
+  const [analyzingLead, setAnalyzingLead] = useState<any | null>(null);
+  const [newClientData, setNewClientData] = useState({ name: "", email: "", password: "", business_name: "" });
+
+  const [formStep, setFormStep] = useState<'form' | 'success' | 'loading'>('form');
+  const [formData, setFormData] = useState({
+    name: '',
+    instagram: '',
+    whatsapp: ''
+  });
+  const [formErrors, setFormErrors] = useState({
+    name: '',
+    instagram: '',
+    whatsapp: ''
+  });
+
+  const validateField = (name: string, value: string) => {
+    let error = '';
+    if (name === 'name') {
+      if (!value.trim()) error = 'Seu nome é essencial para o contato.';
+      else if (value.trim().length < 3) error = 'Por favor, insira seu nome completo.';
+    } else if (name === 'instagram') {
+      if (!value.trim()) error = 'Precisamos do Instagram para análise.';
+    } else if (name === 'whatsapp') {
+      const digits = value.replace(/\D/g, '');
+      if (!value.trim()) error = 'O WhatsApp é obrigatório para o diagnóstico.';
+      else if (digits.length < 10) error = 'Insira um número válido com DDD.';
+    }
+    setFormErrors(prev => ({ ...prev, [name]: error }));
+    return error === '';
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+    validateField(name, value);
+  };
+
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  const fetchLeads = async () => {
+    try {
+      const response = await fetch('/api/leads');
+      if (!response.ok) throw new Error('Falha ao buscar leads');
+      const data = await response.json();
+      setLeads(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Erro ao buscar leads:", error);
+      setLeads([]);
+    }
+  };
+
+  const fetchClients = async () => {
+    try {
+      const response = await fetch('/api/clients');
+      if (!response.ok) throw new Error('Falha ao buscar clientes');
+      const data = await response.json();
+      setClients(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Erro ao buscar clientes:", error);
+      setClients([]);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginData)
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok && data.success) {
+        setIsLoggedIn(true);
+        setUserRole(data.role);
+        
+        if (data.role === 'client') {
+          setLoggedClient(data.user);
+          setActiveDashboardTab('client_home' as any);
+        } else {
+          setActiveDashboardTab('leads');
+          fetchLeads();
+          fetchClients();
+        }
+        
+        setIsLoginModalOpen(false);
+        setIsLeadsModalOpen(true);
+        setLoginData({ email: '', password: '' });
+      } else {
+        alert(data.error || "Credenciais inválidas. Tente novamente.");
+      }
+    } catch (error) {
+      console.error("Erro no login:", error);
+      alert("Erro ao conectar com o servidor. Tente novamente.");
+    }
+  };
+
+  const deleteLead = async (id: number) => {
+    if (!confirm("Tem certeza que deseja excluir este lead?")) return;
+    try {
+      const response = await fetch(`/api/leads/${id}`, { method: 'DELETE' });
+      if (response.ok) fetchLeads();
+    } catch (error) {
+      console.error("Erro ao deletar lead:", error);
+    }
+  };
+
+  const handleUpdateLead = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`/api/leads/${editingLead.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingLead),
+      });
+      if (response.ok) {
+        setEditingLead(null);
+        fetchLeads();
+      }
+    } catch (error) {
+      console.error("Erro ao atualizar lead:", error);
+    }
+  };
+
+  const handleUpdateClient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`/api/clients`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingClient),
+      });
+      if (response.ok) {
+        setEditingClient(null);
+        fetchClients();
+      }
+    } catch (error) {
+      console.error("Erro ao atualizar cliente:", error);
+    }
+  };
+
+  const handleAnalyzeLead = async (lead: any) => {
+    setAnalyzingLead(lead);
+    setIsAnalysisModalOpen(true);
+    setAnalysisResult(null);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+      const prompt = `Analise o perfil deste lead e recomende o tipo de gestão ideal (ex: gestão de vendas, gestão de reconhecimento, gestão de processos, etc.).
+      Nome: ${lead.name}
+      Instagram: ${lead.instagram}
+      WhatsApp: ${lead.whatsapp}
+      
+      Forneça uma análise curta e direta sobre o perfil e a recomendação de gestão.`;
+      
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+      });
+      setAnalysisResult(response.text || "Não foi possível gerar a análise.");
+    } catch (error) {
+      console.error("Erro ao analisar lead:", error);
+      setAnalysisResult("Erro ao gerar análise. Tente novamente.");
+    } finally {
+      setAnalyzingLead(null);
+    }
+  };
+
+  const handleCreateClient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const response = await fetch('/api/clients', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newClientData),
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        setIsCreateClientOpen(false);
+        setNewClientData({ name: "", email: "", password: "", business_name: "" });
+        fetchClients();
+        alert("Cliente cadastrado com sucesso!");
+      } else {
+        const debugStr = data.debug ? JSON.stringify(data.debug) : '';
+        alert(`Erro ao cadastrar cliente: ${data.error || "Erro desconhecido"}\nDebug: ${debugStr}`);
+      }
+    } catch (error) {
+      console.error("Erro ao criar cliente:", error);
+      alert("Erro de conexão ao tentar cadastrar o cliente.");
+    }
+  };
+
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    setIsLeadsModalOpen(false);
+    setLoginData({ email: "", password: "" });
+  };
+
+  const copyToClipboard = (text: string, id: number) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Final validation check
+    const isNameValid = validateField('name', formData.name);
+    const isInstaValid = validateField('instagram', formData.instagram);
+    const isWhatsValid = validateField('whatsapp', formData.whatsapp);
+
+    if (!isNameValid || !isInstaValid || !isWhatsValid) {
+      return;
+    }
+
+    setFormStep('loading');
+
+    try {
+      const response = await fetch('/api/leads', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
+      });
+
+      console.log('API Response:', response);
+      if (response.ok) {
+        setFormStep('success');
+        alert('Informações enviadas com sucesso!');
+      } else {
+        const errorData = await response.json();
+        const debugStr = errorData.debug ? JSON.stringify(errorData.debug) : '';
+        alert(`Erro ao salvar: ${errorData.error || response.statusText}\nDebug: ${debugStr}`);
+        setFormStep('form');
+      }
+    } catch (error) {
+      console.error('Erro de conexão ou inesperado:', error);
+      alert('Erro de conexão ou inesperado. Tente novamente.');
+      setFormStep('form');
+    }
+  };
+
+  const openModal = () => {
+    setIsModalOpen(true);
+    setFormStep('form');
+    setFormData({ name: '', instagram: '', whatsapp: '' });
+    setFormErrors({ name: '', instagram: '', whatsapp: '' });
+  };
+
+  const handleClientAreaClick = () => {
+    if (isLoggedIn) {
+      fetchLeads();
+      fetchClients();
+      setIsLeadsModalOpen(true);
+    } else {
+      setIsLoginModalOpen(true);
+    }
+  };
+
+  return (
+    <ThemeProvider attribute="class" defaultTheme="dark">
+      <div className="min-h-screen relative text-[#F5F5F0] font-sans selection:bg-emerald-500/30 overflow-x-hidden">
+        <DottedSurface />
+        <GreenSparks />
+        {/* Lead Modal */}
+
+      <AnimatePresence>
+        {isModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsModalOpen(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-lg bg-zinc-900 border border-white/10 rounded-[24px] md:rounded-[32px] overflow-hidden shadow-2xl max-h-[90vh] overflow-y-auto"
+            >
+              <button 
+                onClick={() => setIsModalOpen(false)}
+                className="absolute top-4 right-4 md:top-6 md:right-6 text-zinc-500 hover:text-white transition-colors z-10 bg-black/50 p-2 rounded-full backdrop-blur-md"
+              >
+                <X className="w-5 h-5 md:w-6 md:h-6" />
+              </button>
+
+              <div className="p-6 md:p-12">
+                {formStep === 'form' ? (
+                  <>
+                    <div className="mb-6 md:mb-8">
+                      <span className="inline-flex items-center gap-2 bg-emerald-500/10 text-emerald-500 text-[9px] md:text-[10px] font-black px-3 py-1.5 md:px-4 md:py-2 rounded-full uppercase tracking-[0.2em] border border-emerald-500/20 mb-4">
+                        <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                        Vagas Limitadas: 02 Restantes
+                      </span>
+                      <h2 className="text-2xl md:text-3xl font-bold tracking-tighter">Solicitar Diagnóstico</h2>
+                      <p className="text-zinc-500 text-xs md:text-sm mt-2">Preencha os dados abaixo para análise de viabilidade.</p>
+                    </div>
+
+                    <form onSubmit={handleSubmit} noValidate className="space-y-4 md:space-y-6">
+                      <div>
+                        <label className="block text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-2 ml-1">Seu Nome</label>
+                          <input 
+                            required
+                            type="text" 
+                            name="name"
+                            value={formData.name}
+                            onChange={handleInputChange}
+                            onBlur={(e) => validateField('name', e.target.value)}
+                            placeholder="Como prefere ser chamado?"
+                            className={`w-full bg-white/5 border ${formErrors.name ? 'border-red-500 ring-2 ring-red-500/20' : 'border-white/10'} rounded-xl md:rounded-2xl px-4 py-3 md:px-6 md:py-4 text-sm focus:outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 transition-all duration-300 placeholder:text-zinc-600`}
+                          />
+                          <AnimatePresence>
+                            {formErrors.name && (
+                              <motion.p 
+                                initial={{ opacity: 0, height: 0, y: -10 }}
+                                animate={{ opacity: 1, height: 'auto', y: 0 }}
+                                exit={{ opacity: 0, height: 0, y: -10 }}
+                                className="text-[10px] text-red-400 mt-2 ml-1 flex items-center gap-1 font-bold"
+                              >
+                                <AlertCircle className="w-3 h-3" /> {formErrors.name}
+                              </motion.p>
+                            )}
+                          </AnimatePresence>
+                        </div>
+
+                        <div>
+                          <label className="block text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-2 ml-1">Instagram da Empresa</label>
+                          <div className="relative">
+                            <Instagram className={`absolute left-4 md:left-6 top-1/2 -translate-y-1/2 w-4 h-4 transition-colors ${formErrors.instagram ? 'text-red-400' : 'text-zinc-500'}`} />
+                            <input 
+                              required
+                              type="text" 
+                              name="instagram"
+                              value={formData.instagram}
+                              onChange={handleInputChange}
+                              onBlur={(e) => validateField('instagram', e.target.value)}
+                              placeholder="@suaempresa"
+                              className={`w-full bg-white/5 border ${formErrors.instagram ? 'border-red-500 ring-2 ring-red-500/20' : 'border-white/10'} rounded-xl md:rounded-2xl pl-12 md:pl-14 pr-4 md:pr-6 py-3 md:py-4 text-sm focus:outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 transition-all duration-300 placeholder:text-zinc-600`}
+                            />
+                          </div>
+                          <AnimatePresence>
+                            {formErrors.instagram && (
+                              <motion.p 
+                                initial={{ opacity: 0, height: 0, y: -10 }}
+                                animate={{ opacity: 1, height: 'auto', y: 0 }}
+                                exit={{ opacity: 0, height: 0, y: -10 }}
+                                className="text-[10px] text-red-400 mt-2 ml-1 flex items-center gap-1 font-bold"
+                              >
+                                <AlertCircle className="w-3 h-3" /> {formErrors.instagram}
+                              </motion.p>
+                            )}
+                          </AnimatePresence>
+                        </div>
+
+                        <div>
+                          <label className="block text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-2 ml-1">WhatsApp Direto</label>
+                          <div className="relative">
+                            <Phone className={`absolute left-4 md:left-6 top-1/2 -translate-y-1/2 w-4 h-4 transition-colors ${formErrors.whatsapp ? 'text-red-400' : 'text-zinc-500'}`} />
+                            <input 
+                              required
+                              type="tel" 
+                              name="whatsapp"
+                              value={formData.whatsapp}
+                              onChange={handleInputChange}
+                              onBlur={(e) => validateField('whatsapp', e.target.value)}
+                              placeholder="(00) 00000-0000"
+                              className={`w-full bg-white/5 border ${formErrors.whatsapp ? 'border-red-500 ring-2 ring-red-500/20' : 'border-white/10'} rounded-xl md:rounded-2xl pl-12 md:pl-14 pr-4 md:pr-6 py-3 md:py-4 text-sm focus:outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 transition-all duration-300 placeholder:text-zinc-600`}
+                            />
+                          </div>
+                          <AnimatePresence>
+                            {formErrors.whatsapp && (
+                              <motion.p 
+                                initial={{ opacity: 0, height: 0, y: -10 }}
+                                animate={{ opacity: 1, height: 'auto', y: 0 }}
+                                exit={{ opacity: 0, height: 0, y: -10 }}
+                                className="text-[10px] text-red-400 mt-2 ml-1 flex items-center gap-1 font-bold"
+                              >
+                                <AlertCircle className="w-3 h-3" /> {formErrors.whatsapp}
+                              </motion.p>
+                            )}
+                          </AnimatePresence>
+                        </div>
+
+                      <button 
+                        type="submit"
+                        disabled={formStep === 'loading'}
+                        className="w-full bg-emerald-500 text-black py-4 md:py-5 rounded-xl md:rounded-2xl font-bold uppercase tracking-widest text-[10px] md:text-xs hover:bg-emerald-400 transition-all flex items-center justify-center gap-2 group disabled:opacity-50 mt-2"
+                      >
+                        {formStep === 'loading' ? 'Enviando...' : 'Enviar para Análise'}
+                        {formStep !== 'loading' && <Send className="w-4 h-4 group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />}
+                      </button>
+                      
+                      <p className="text-center text-[9px] text-zinc-600 uppercase tracking-widest">
+                        Seus dados estão protegidos e serão usados apenas para este diagnóstico.
+                      </p>
+                    </form>
+                  </>
+                ) : (
+                  <div className="text-center py-12">
+                    <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-8">
+                      <CheckCircle2 className="w-10 h-10 text-emerald-500" />
+                    </div>
+                    <h2 className="text-3xl font-bold tracking-tighter mb-4">Solicitação Enviada</h2>
+                    <p className="text-zinc-400 text-sm leading-relaxed mb-8">
+                      Lucas Constantino analisará seu perfil pessoalmente. Se houver fit estratégico, entraremos em contato via WhatsApp nas próximas horas.
+                    </p>
+                    <button 
+                      onClick={() => setIsModalOpen(false)}
+                      className="text-emerald-500 font-bold uppercase tracking-widest text-[10px] hover:underline"
+                    >
+                      Voltar para o site
+                    </button>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Login Modal */}
+      <AnimatePresence>
+        {isLoginModalOpen && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsLoginModalOpen(false)}
+              className="absolute inset-0 bg-black/90 backdrop-blur-xl"
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 md:p-12 shadow-2xl"
+            >
+              <button 
+                onClick={() => setIsLoginModalOpen(false)}
+                className="absolute top-6 right-6 text-zinc-500 hover:text-white transition-colors"
+              >
+                <X className="w-6 h-6" />
+              </button>
+
+              <div className="text-center mb-8">
+                <div className="w-16 h-16 border border-emerald-500/30 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <Lock className="w-6 h-6 text-emerald-500" />
+                </div>
+                <h2 className="text-2xl font-bold tracking-tighter">Acesso Restrito</h2>
+                <p className="text-zinc-500 text-xs mt-2 uppercase tracking-widest">Apenas para Lucas Constantino</p>
+              </div>
+
+              <form onSubmit={handleLogin} className="space-y-6">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-2 ml-1">E-mail</label>
+                  <input 
+                    required
+                    type="email" 
+                    value={loginData.email}
+                    onChange={(e) => setLoginData({...loginData, email: e.target.value})}
+                    placeholder="seu@email.com"
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-sm focus:outline-none focus:border-emerald-500 transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-2 ml-1">Senha</label>
+                  <input 
+                    required
+                    type="password" 
+                    value={loginData.password}
+                    onChange={(e) => setLoginData({...loginData, password: e.target.value})}
+                    placeholder="••••••••"
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-sm focus:outline-none focus:border-emerald-500 transition-colors"
+                  />
+                  <button 
+                    type="button"
+                    onClick={() => { setIsLoginModalOpen(false); /* setIsForgotPasswordModalOpen(true); */ alert("Funcionalidade em desenvolvimento. Entre em contato com o suporte."); }}
+                    className="text-[9px] font-bold uppercase tracking-widest text-emerald-500 hover:text-emerald-400 mt-2 ml-1"
+                  >
+                    Esqueci minha senha
+                  </button>
+                </div>
+
+                <button 
+                  type="submit"
+                  className="w-full bg-white text-black py-5 rounded-2xl font-bold uppercase tracking-widest text-xs hover:bg-zinc-200 transition-all"
+                >
+                  Entrar no Painel
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Leads Dashboard Modal */}
+      <AnimatePresence>
+        {isLeadsModalOpen && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsLeadsModalOpen(false)}
+              className="absolute inset-0 bg-black/95 backdrop-blur-2xl"
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className="relative w-full max-w-5xl h-[95vh] md:h-[85vh] bg-zinc-900 border border-white/10 rounded-[24px] md:rounded-[40px] overflow-hidden shadow-2xl flex flex-col"
+            >
+              <div className="p-5 md:p-8 border-b border-white/5 flex flex-col md:flex-row md:items-center justify-between bg-zinc-900/50 backdrop-blur-md gap-4 md:gap-6 relative">
+                <div className="flex flex-col md:flex-row md:items-center gap-4 md:gap-8 pr-16 md:pr-0">
+                  <div>
+                    <h2 className="text-xl md:text-2xl font-bold tracking-tighter">Painel de Gestão</h2>
+                    <p className="text-zinc-500 text-[9px] md:text-[10px] uppercase tracking-widest mt-1">Acesso Administrativo</p>
+                  </div>
+                  
+                  <div className="flex bg-black/40 p-1 rounded-xl border border-white/5 self-start md:self-auto w-full md:w-auto overflow-x-auto hide-scrollbar">
+                    {userRole === 'admin' ? (
+                      <>
+                        <button 
+                          onClick={() => setActiveDashboardTab('leads')}
+                          className={`flex-1 md:flex-none px-4 md:px-6 py-2 rounded-lg text-[9px] md:text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${activeDashboardTab === 'leads' ? 'bg-emerald-500 text-black shadow-lg' : 'text-zinc-500 hover:text-white'}`}
+                        >
+                          Leads
+                        </button>
+                        <button 
+                          onClick={() => setActiveDashboardTab('clients')}
+                          className={`flex-1 md:flex-none px-4 md:px-6 py-2 rounded-lg text-[9px] md:text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${activeDashboardTab === 'clients' ? 'bg-emerald-500 text-black shadow-lg' : 'text-zinc-500 hover:text-white'}`}
+                        >
+                          Clientes
+                        </button>
+                        <button 
+                          onClick={() => setActiveDashboardTab('timeline')}
+                          className={`flex-1 md:flex-none px-4 md:px-6 py-2 rounded-lg text-[9px] md:text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${activeDashboardTab === 'timeline' ? 'bg-emerald-500 text-black shadow-lg' : 'text-zinc-500 hover:text-white'}`}
+                        >
+                          Timeline
+                        </button>
+                      </>
+                    ) : (
+                      <button 
+                        className="flex-1 md:flex-none px-4 md:px-6 py-2 rounded-lg text-[9px] md:text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap bg-emerald-500 text-black shadow-lg"
+                      >
+                        Meu Painel
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between md:justify-end gap-4 w-full md:w-auto mt-2 md:mt-0">
+                  {activeDashboardTab === 'clients' && (
+                    <button 
+                      onClick={() => setIsCreateClientOpen(true)}
+                      className="flex items-center justify-center gap-2 bg-emerald-500 text-black px-4 py-2.5 rounded-full text-[9px] md:text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-400 transition-all w-full md:w-auto"
+                    >
+                      <Plus className="w-3 h-3" /> Novo Cliente
+                    </button>
+                  )}
+                  <div className="flex items-center gap-1 md:gap-2 absolute top-4 right-4 md:relative md:top-auto md:right-auto">
+                    <button 
+                      onClick={() => {
+                        fetchLeads();
+                        fetchClients();
+                      }}
+                      className="p-2 md:p-3 rounded-full border border-white/10 hover:bg-white/5 transition-colors bg-black/50 md:bg-transparent backdrop-blur-md md:backdrop-blur-none"
+                    >
+                      <Zap className="w-4 h-4 text-emerald-500" />
+                    </button>
+                    <button 
+                      onClick={() => setIsLeadsModalOpen(false)}
+                      className="p-2 md:p-3 rounded-full border border-white/10 hover:bg-white/5 transition-colors bg-black/50 md:bg-transparent backdrop-blur-md md:backdrop-blur-none"
+                    >
+                      <X className="w-4 h-4 md:w-5 md:h-5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4 md:p-8">
+                {userRole === 'client' ? (
+                  <div className="text-center py-20 flex flex-col items-center justify-center">
+                    <div className="w-20 h-20 bg-emerald-500/10 rounded-full flex items-center justify-center mb-6 border border-emerald-500/20">
+                      <User className="w-10 h-10 text-emerald-500" />
+                    </div>
+                    <h3 className="text-2xl md:text-3xl font-bold tracking-tighter mb-2">Bem-vindo, {loggedClient?.name}</h3>
+                    <p className="text-emerald-500 text-[10px] md:text-xs font-bold uppercase tracking-widest mb-8">{loggedClient?.business_name}</p>
+                    <p className="text-zinc-500 uppercase tracking-widest text-[10px] md:text-xs max-w-md mx-auto leading-relaxed">
+                      Seu painel exclusivo está sendo preparado. Em breve, você poderá acompanhar todas as métricas e resultados da sua operação de tráfego aqui.
+                    </p>
+                  </div>
+                ) : activeDashboardTab === 'leads' ? (
+                  <div className="bg-black/40 border border-white/5 rounded-[24px] overflow-hidden overflow-x-auto hide-scrollbar">
+                    <div className="min-w-[800px]">
+                      <div className="grid grid-cols-12 gap-4 p-5 border-b border-white/5 text-[10px] font-bold uppercase tracking-widest text-zinc-500 bg-white/[0.02]">
+                        <div className="col-span-4">Lead</div>
+                        <div className="col-span-3">Contato</div>
+                        <div className="col-span-3">Data de Entrada</div>
+                        <div className="col-span-2 text-right">Ações</div>
+                      </div>
+                      
+                      <div className="divide-y divide-white/5">
+                        {leads.length === 0 ? (
+                          <div className="text-center py-20">
+                            <p className="text-zinc-500 uppercase tracking-widest text-xs">Nenhum lead captado ainda.</p>
+                          </div>
+                        ) : (
+                          leads.map((lead) => (
+                            <div 
+                              key={lead.id} 
+                              className="group grid grid-cols-12 gap-4 p-5 items-center hover:bg-white/[0.02] transition-colors"
+                            >
+                              <div className="col-span-4 flex items-center gap-4 w-full">
+                                <div className="w-10 h-10 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center text-sm font-bold border border-emerald-500/20 shrink-0">
+                                  {lead.name?.charAt(0) || '?'}
+                                </div>
+                                <div className="min-w-0">
+                                  <h4 className="font-bold text-sm text-white truncate flex items-center gap-2">
+                                    {lead.name || 'Sem Nome'}
+                                    <span className={`w-2 h-2 rounded-full ${lead.status === 'analyzed' ? 'bg-emerald-500' : 'bg-amber-500'}`} title={lead.status === 'analyzed' ? 'Analisado' : 'Pendente'} />
+                                  </h4>
+                                  <p className="text-[10px] text-zinc-500 font-mono mt-0.5">ID: {lead.id.toString().padStart(4, '0')}</p>
+                                </div>
+                              </div>
+
+                              <div className="col-span-3 flex items-center gap-2 w-full">
+                                <button 
+                                  onClick={() => handleAnalyzeLead(lead)}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500/10 text-indigo-500 hover:bg-indigo-500/20 transition-colors text-[10px] font-bold uppercase tracking-widest border border-indigo-500/10"
+                                >
+                                  <Sparkles className="w-3 h-3" /> IA
+                                </button>
+                                <a 
+                                  href={`https://wa.me/${(lead.whatsapp || '').replace(/\D/g, '')}`} 
+                                  target="_blank" 
+                                  rel="noreferrer"
+                                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors text-[10px] font-bold uppercase tracking-widest border border-emerald-500/10"
+                                >
+                                  <Phone className="w-3 h-3" /> Whats
+                                </a>
+                                {lead.instagram && (
+                                  <a 
+                                    href={`https://instagram.com/${lead.instagram.replace('@', '')}`} 
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 text-zinc-300 hover:bg-white/10 transition-colors text-[10px] font-bold uppercase tracking-widest border border-white/5"
+                                  >
+                                    <Instagram className="w-3 h-3" /> Insta
+                                  </a>
+                                )}
+                              </div>
+
+                              <div className="col-span-3 flex items-center w-full text-zinc-400 text-xs font-mono">
+                                {lead.created_at ? new Date(lead.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '---'}
+                              </div>
+
+                              <div className="col-span-2 flex items-center justify-end gap-1 w-full">
+                                <button 
+                                  onClick={() => copyToClipboard(lead.whatsapp || '', lead.id)}
+                                  className="p-2 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-white transition-colors"
+                                  title="Copiar WhatsApp"
+                                >
+                                  {copiedId === lead.id ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                                </button>
+                                <button 
+                                  onClick={() => setEditingLead(lead)}
+                                  className="p-2 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-blue-400 transition-colors"
+                                  title="Editar Lead"
+                                >
+                                  <Edit className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  onClick={() => deleteLead(lead.id)}
+                                  className="p-2 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-red-400 transition-colors"
+                                  title="Excluir Lead"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : activeDashboardTab === 'timeline' ? (
+                  <div className="h-[60vh] md:h-[70vh] rounded-[24px] overflow-hidden border border-white/5 bg-black">
+                    <RadialOrbitalTimelineDemo />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                    {clients.length === 0 ? (
+                      <div className="col-span-full text-center py-20">
+                        <Users className="w-12 h-12 text-zinc-800 mx-auto mb-4" />
+                        <p className="text-zinc-500 uppercase tracking-widest text-xs">Nenhum cliente cadastrado.</p>
+                      </div>
+                    ) : (
+                      clients.map((client) => (
+                        <div key={client.id} className="bg-white/5 border border-white/5 rounded-2xl md:rounded-3xl p-5 md:p-8 hover:border-emerald-500/20 transition-all">
+                          <div className="flex items-start justify-between mb-4 md:mb-6">
+                            <div className="w-10 h-10 md:w-14 md:h-14 bg-emerald-500 rounded-xl md:rounded-2xl flex items-center justify-center text-black font-black text-base md:text-xl">
+                              {client.name?.charAt(0) || '?'}
+                            </div>
+                            <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-500 font-mono">ID: {client.id.toString().padStart(4, '0')}</span>
+                          </div>
+                          <h4 className="text-base md:text-xl font-bold tracking-tight mb-1">{client.name || 'Sem Nome'}</h4>
+                          <p className="text-emerald-500 text-[9px] md:text-xs font-bold uppercase tracking-widest mb-4">{client.business_name || "Sem Empresa"}</p>
+                          <button 
+                            onClick={() => setEditingClient(client)}
+                            className="text-[9px] font-bold uppercase tracking-widest text-emerald-500 hover:text-emerald-400 mb-4"
+                          >
+                            Editar Cliente
+                          </button>
+                          <div className="pt-4 md:pt-6 border-t border-white/5 space-y-2 md:space-y-3">
+                            <div className="flex items-center justify-between text-[9px] md:text-[11px]">
+                              <span className="text-zinc-500 uppercase tracking-widest">E-mail</span>
+                              <span className="text-zinc-300 truncate ml-4 font-mono">{client.email}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-[9px] md:text-[11px]">
+                              <span className="text-zinc-500 uppercase tracking-widest">Desde</span>
+                              <span className="text-zinc-300 font-mono">{client.created_at ? new Date(client.created_at).toLocaleDateString('pt-BR') : '---'}</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-6 border-t border-white/5 bg-black/20 text-center">
+                <button 
+                  onClick={handleLogout}
+                  className="text-[10px] font-bold uppercase tracking-[0.3em] text-zinc-600 hover:text-white transition-colors"
+                >
+                  Sair do Sistema
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Status Check Modal */}
+      <AnimatePresence>
+        {isStatusModalOpen && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsStatusModalOpen(false)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl">
+              <h3 className="text-xl font-bold mb-6">Consultar Status</h3>
+              <input 
+                type="tel" 
+                value={statusQueryWhatsapp} 
+                onChange={(e) => setStatusQueryWhatsapp(e.target.value)} 
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm mb-4" 
+                placeholder="Seu WhatsApp" 
+              />
+              <button 
+                onClick={async () => {
+                  const response = await fetch('/api/leads');
+                  const data = await response.json();
+                  const found = data.find((l: any) => l.whatsapp === statusQueryWhatsapp);
+                  if (found) {
+                    setLeadStatus(found);
+                  } else {
+                    alert('Lead não encontrado.');
+                  }
+                }}
+                className="w-full py-3 rounded-xl bg-emerald-500 text-black text-xs font-bold uppercase tracking-widest"
+              >
+                Consultar
+              </button>
+              {leadStatus && leadStatus.status === 'analyzed' && leadStatus.verdict === 'not suitable' && (
+                <div className="mt-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
+                  <h4 className="text-red-500 font-bold mb-2">Análise Concluída</h4>
+                  <p className="text-xs text-zinc-300">{leadStatus.feedback || 'Infelizmente, seu perfil não se encaixa no momento. Tente novamente em breve.'}</p>
+                </div>
+              )}
+              {leadStatus && leadStatus.status === 'analyzed' && leadStatus.verdict === 'suitable' && (
+                <div className="mt-6 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+                  <h4 className="text-emerald-500 font-bold mb-2">Análise Concluída</h4>
+                  <p className="text-xs text-zinc-300">Parabéns! Seu perfil foi aprovado.</p>
+                </div>
+              )}
+              {leadStatus && leadStatus.status === 'pending' && (
+                <div className="mt-6 p-4 bg-zinc-800 border border-zinc-700 rounded-xl">
+                  <h4 className="text-zinc-300 font-bold mb-2">Em Análise</h4>
+                  <p className="text-xs text-zinc-400">Seu perfil ainda está sendo analisado. Aguarde novidades.</p>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit Lead Modal */}
+      <AnimatePresence>
+        {editingLead && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setEditingLead(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl">
+              <h3 className="text-xl font-bold mb-6">Editar Lead</h3>
+              <form onSubmit={handleUpdateLead} className="space-y-4">
+                <input value={editingLead.name} onChange={e => setEditingLead({...editingLead, name: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Nome" />
+                <input value={editingLead.instagram} onChange={e => setEditingLead({...editingLead, instagram: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Instagram" />
+                <input value={editingLead.whatsapp} onChange={e => setEditingLead({...editingLead, whatsapp: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="WhatsApp" />
+                <select value={editingLead.status || 'pending'} onChange={e => setEditingLead({...editingLead, status: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm">
+                  <option value="pending">Pendente</option>
+                  <option value="analyzed">Analisado</option>
+                </select>
+                <select value={editingLead.verdict || ''} onChange={e => setEditingLead({...editingLead, verdict: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm">
+                  <option value="">Selecione o Veredito</option>
+                  <option value="suitable">Apto</option>
+                  <option value="not suitable">Não Apto</option>
+                </select>
+                <textarea value={editingLead.feedback || ''} onChange={e => setEditingLead({...editingLead, feedback: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Feedback para o usuário" />
+                <div className="flex gap-3 pt-4">
+                  <button type="button" onClick={() => setEditingLead(null)} className="flex-1 py-3 rounded-xl border border-white/10 text-xs font-bold uppercase tracking-widest">Cancelar</button>
+                  <button type="submit" className="flex-1 py-3 rounded-xl bg-emerald-500 text-black text-xs font-bold uppercase tracking-widest">Salvar</button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Create Client Modal */}
+      <AnimatePresence>
+        {isCreateClientOpen && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsCreateClientOpen(false)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl">
+              <h3 className="text-xl font-bold mb-6">Cadastrar Novo Cliente</h3>
+              <form onSubmit={handleCreateClient} noValidate className="space-y-4">
+                <input required value={newClientData.name} onChange={e => setNewClientData({...newClientData, name: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Nome Completo" />
+                <input required type="email" value={newClientData.email} onChange={e => setNewClientData({...newClientData, email: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="E-mail de Acesso" />
+                <input required type="password" value={newClientData.password} onChange={e => setNewClientData({...newClientData, password: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Senha Provisória" />
+                <input value={newClientData.business_name} onChange={e => setNewClientData({...newClientData, business_name: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Nome da Empresa (Opcional)" />
+                <div className="flex gap-3 pt-4">
+                  <button type="button" onClick={() => setIsCreateClientOpen(false)} className="flex-1 py-3 rounded-xl border border-white/10 text-xs font-bold uppercase tracking-widest">Cancelar</button>
+                  <button type="submit" className="flex-1 py-3 rounded-xl bg-emerald-500 text-black text-xs font-bold uppercase tracking-widest">Cadastrar</button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit Client Modal */}
+      <AnimatePresence>
+        {editingClient && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setEditingClient(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl">
+              <h3 className="text-xl font-bold mb-6">Editar Cliente</h3>
+              <form onSubmit={handleUpdateClient} className="space-y-4">
+                <input value={editingClient.name} onChange={e => setEditingClient({...editingClient, name: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Nome" />
+                <input value={editingClient.email} onChange={e => setEditingClient({...editingClient, email: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="E-mail" />
+                <input value={editingClient.password || ''} onChange={e => setEditingClient({...editingClient, password: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Nova Senha" />
+                <input value={editingClient.business_name || ''} onChange={e => setEditingClient({...editingClient, business_name: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm" placeholder="Nome da Empresa" />
+                <div className="flex gap-3 pt-4">
+                  <button type="button" onClick={() => setEditingClient(null)} className="flex-1 py-3 rounded-xl border border-white/10 text-xs font-bold uppercase tracking-widest">Cancelar</button>
+                  <button type="submit" className="flex-1 py-3 rounded-xl bg-emerald-500 text-black text-xs font-bold uppercase tracking-widest">Salvar</button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* AI Analysis Modal */}
+      <AnimatePresence>
+        {isAnalysisModalOpen && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsAnalysisModalOpen(false)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }} className="relative w-full max-w-lg bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl">
+              <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-indigo-500" /> 
+                Análise de IA: {analyzingLead?.name}
+              </h3>
+              {analyzingLead ? (
+                <div className="text-center py-10">
+                  <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                  <p className="text-zinc-400">Analisando perfil...</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-white/5 p-4 rounded-xl text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                    {analysisResult || "Nenhuma análise disponível."}
+                  </div>
+                  <button onClick={() => setIsAnalysisModalOpen(false)} className="w-full py-3 rounded-xl bg-indigo-500 text-white text-xs font-bold uppercase tracking-widest">Fechar</button>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Floating Mobile CTA */}
+      <div className="fixed bottom-4 left-0 right-0 z-40 px-4 lg:hidden pointer-events-none">
+        <motion.div 
+          initial={{ y: 100, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          transition={{ delay: 2.5 }}
+          className="pointer-events-auto"
+        >
+          <button 
+            onClick={openModal}
+            className="w-full bg-emerald-500 text-black py-3.5 rounded-xl font-black uppercase tracking-[0.15em] text-[10px] shadow-[0_8px_30px_rgba(16,185,129,0.35)] flex items-center justify-center gap-2 btn-shine relative overflow-hidden"
+          >
+            <Zap className="w-3 h-3 fill-current" /> Solicitar Diagnóstico
+          </button>
+        </motion.div>
+      </div>
+
+      {/* Navigation - Premium Glass */}
+      <nav className="fixed top-0 w-full z-50 bg-[#050505]/80 backdrop-blur-2xl border-b border-white/[0.06]">
+        <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
+        <div className="max-w-7xl mx-auto px-4 md:px-8 h-16 md:h-24 flex items-center justify-between">
+          <div className="flex items-center gap-2 md:gap-3">
+            <div className="relative w-7 h-7 md:w-10 md:h-10 border border-emerald-500/40 rounded-full flex items-center justify-center">
+              <div className="absolute inset-0 rounded-full bg-emerald-500/10 animate-ping" style={{ animationDuration: '3s' }} />
+              <div className="w-1.5 h-1.5 md:w-2 md:h-2 bg-emerald-500 rounded-full shadow-[0_0_10px_rgba(16,185,129,0.8)]" />
+            </div>
+            <span className="text-sm md:text-xl font-bold tracking-[0.2em] md:tracking-[0.25em] uppercase text-gradient-white">Constantino</span>
+          </div>
+          
+          <div className="hidden lg:flex items-center gap-12 text-[11px] font-bold uppercase tracking-[0.2em] text-zinc-500">
+            <a href="#method" className="hover-line hover:text-white transition-colors duration-300">A Estratégia</a>
+            <a href="#engine" className="hover-line hover:text-white transition-colors duration-300">O Motor de Vendas</a>
+            <a href="#results" className="hover-line hover:text-white transition-colors duration-300">Resultados</a>
+            <a href="#apply" className="hover-line hover:text-white transition-colors duration-300">Aplicação</a>
+            <button onClick={() => setIsStatusModalOpen(true)} className="hover-line hover:text-white transition-colors duration-300">Consultar Status</button>
+          </div>
+
+          <button 
+            onClick={handleClientAreaClick}
+            className="group flex items-center gap-2 text-[9px] md:text-[11px] font-bold uppercase tracking-[0.2em] border border-white/10 px-4 py-2.5 md:px-6 md:py-3 rounded-full hover:bg-emerald-500 hover:text-black hover:border-emerald-500 hover:shadow-[0_0_30px_rgba(16,185,129,0.3)] transition-all duration-500"
+          >
+            {isLoggedIn ? "Painel de Leads" : "Área do Cliente"}
+            <Lock className="w-3 h-3 opacity-50 group-hover:opacity-100 transition-opacity" />
+          </button>
+        </div>
+      </nav>
+
+      <main>
+        {/* Hero - Cinematic Premium */}
+        <section className="relative pt-24 md:pt-48 pb-10 md:pb-40 px-5 md:px-8 overflow-hidden">
+          {/* Floating Orbs */}
+          <div className="absolute top-20 left-1/4 w-[400px] h-[400px] bg-emerald-500/[0.04] rounded-full blur-[120px] pointer-events-none" style={{ animation: 'orbFloat 15s ease-in-out infinite' }} />
+          <div className="absolute bottom-0 right-1/4 w-[300px] h-[300px] bg-emerald-500/[0.06] rounded-full blur-[100px] pointer-events-none" style={{ animation: 'orbFloat 12s ease-in-out 3s infinite' }} />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-radial-gradient pointer-events-none opacity-50" />
+
+          <div className="max-w-5xl mx-auto text-center relative">
+            <motion.div 
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.8 }}
+              className="mb-5 md:mb-10 inline-flex items-center gap-2 md:gap-2.5 bg-emerald-500/[0.08] text-emerald-400 text-[8px] md:text-[10px] font-black px-3 py-1.5 md:px-6 md:py-2.5 rounded-full uppercase tracking-[0.2em] md:tracking-[0.35em] border border-emerald-500/20 relative overflow-hidden"
+            >
+              <div className="absolute inset-0 animate-shimmer" />
+              <span className="relative flex items-center gap-2.5">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                </span>
+                Gestão de Tráfego de Alta Performance
+              </span>
+            </motion.div>
+
+            <motion.h1 
+              initial={{ opacity: 0, y: 40 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }}
+              className="text-[2.8rem] sm:text-6xl md:text-[9rem] font-light tracking-[-0.04em] leading-[0.88] mb-5 md:mb-14 font-serif"
+            >
+              <span className="text-gradient-white">Lucas</span> <br /> 
+              <span className="font-bold italic text-gradient-animated text-glow">Constantino</span>
+            </motion.h1>
+
+            <motion.p 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.6, duration: 1 }}
+              className="max-w-2xl mx-auto text-zinc-400 text-[15px] md:text-xl mb-8 md:mb-16 leading-relaxed font-light px-2 md:px-0"
+            >
+              Responsável por <span className="text-white font-semibold">vendas e fechamentos de contratos diários</span> para operações de elite. 
+              Não entrego apenas cliques, entrego <span className="text-emerald-400 italic font-medium">lucro líquido e escala previsível</span>.
+            </motion.p>
+
+            <motion.div 
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 1, duration: 0.8 }}
+              className="flex flex-col items-center gap-5 md:gap-8 px-2 md:px-0"
+            >
+              <button 
+                onClick={openModal}
+                className="relative w-full sm:w-auto bg-emerald-500 text-black px-6 md:px-20 py-4 md:py-7 rounded-full font-black text-[10px] md:text-sm uppercase tracking-[0.15em] md:tracking-[0.3em] hover:scale-105 active:scale-[0.98] transition-all duration-500 cursor-pointer overflow-hidden group animate-glow-pulse btn-shine"
+              >
+                <span className="relative z-10 flex items-center justify-center gap-2 md:gap-3">
+                  Solicitar Diagnóstico de Escala
+                  <ArrowRight className="w-4 h-4 md:w-5 md:h-5 group-hover:translate-x-2 transition-transform duration-300" />
+                </span>
+              </button>
+
+              <div className="flex flex-col items-center gap-2">
+                <p className="text-[9px] md:text-[10px] text-zinc-500 uppercase tracking-[0.25em] flex items-center gap-2 text-center font-bold">
+                  <Shield className="w-3 h-3 shrink-0 text-emerald-500" /> Vagas limitadas — Apenas 2 restantes para Q1/2024
+                </p>
+                <div className="flex items-center gap-3">
+                  <div className="flex -space-x-2">
+                    {[1,2,3,4].map(i => (
+                      <div key={i} className="w-6 h-6 rounded-full bg-zinc-800 border-2 border-[#050505] flex items-center justify-center text-[8px] font-bold text-zinc-400">
+                        {String.fromCharCode(64 + i)}
+                      </div>
+                    ))}
+                  </div>
+                  <span className="text-[9px] text-zinc-600 font-medium">+47 empresas atendidas</span>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        </section>
+
+        {/* Core Strengths - Infinite Marquee */}
+        <section className="py-4 md:py-10 border-y border-white/[0.04] bg-white/[0.01] overflow-hidden relative">
+          <div className="absolute left-0 top-0 bottom-0 w-32 bg-gradient-to-r from-[#050505] to-transparent z-10 pointer-events-none" />
+          <div className="absolute right-0 top-0 bottom-0 w-32 bg-gradient-to-l from-[#050505] to-transparent z-10 pointer-events-none" />
+          <div className="flex animate-marquee whitespace-nowrap">
+            {[...Array(2)].map((_, groupIdx) => (
+              <div key={groupIdx} className="flex items-center gap-8 md:gap-20 px-4 md:px-10 shrink-0">
+                {[
+                  { icon: <Zap className="w-3.5 h-3.5 text-emerald-500" />, text: "Estratégia Pura" },
+                  { icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />, text: "Foco Total em Vendas" },
+                  { icon: <Star className="w-3.5 h-3.5 text-emerald-500" />, text: "Alta Conversão" },
+                  { icon: <Shield className="w-3.5 h-3.5 text-emerald-500" />, text: "Clientes Fixos" },
+                  { icon: <TrendingUp className="w-3.5 h-3.5 text-emerald-500" />, text: "ROI Comprovado" },
+                  { icon: <Globe className="w-3.5 h-3.5 text-emerald-500" />, text: "Escala Nacional" },
+                ].map((item, i) => (
+                  <span key={i} className="flex items-center gap-2 md:gap-2.5 text-[8px] md:text-[11px] font-black uppercase tracking-[0.2em] md:tracking-[0.35em] text-zinc-400 shrink-0">
+                    {item.icon} {item.text}
+                    <span className="text-emerald-500/30 ml-3 md:ml-6">✦</span>
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* The Methodology - Premium */}
+        <section id="method" className="py-10 md:py-40 px-5 md:px-8 max-w-7xl mx-auto relative">
+          <div className="absolute top-1/2 left-0 w-[500px] h-[500px] bg-emerald-500/[0.03] rounded-full blur-[150px] pointer-events-none -translate-y-1/2" />
+          <div className="grid lg:grid-cols-2 gap-8 md:gap-24 items-center relative">
+            <motion.div {...fadeInUp}>
+              <span className="text-[9px] md:text-[10px] font-black uppercase tracking-[0.4em] text-emerald-500 mb-4 block">O Framework</span>
+              <h2 className="text-3xl md:text-6xl font-light tracking-[-0.03em] mb-3 md:mb-8 leading-tight font-serif">
+                O Método <span className="italic text-gradient-animated font-bold">Constantino™</span>
+              </h2>
+              <p className="text-zinc-400 text-sm md:text-lg mb-6 md:mb-14 leading-relaxed font-light">
+                Tráfego pago sem estratégia é apenas gasto. Meu método foca no fechamento, transformando a atenção do público em contratos assinados todos os dias.
+              </p>
+              
+              <div className="space-y-6 md:space-y-8">
+                {[
+                  { title: "Arquitetura de Conversão", desc: "Criamos o caminho mais curto entre o anúncio e o dinheiro no caixa.", pct: "95%" },
+                  { title: "Otimização de ROI Real", desc: "Não olhamos para CTR. Olhamos para o custo por contrato fechado.", pct: "88%" },
+                  { title: "Retenção e LTV", desc: "Estratégias para manter clientes fixos e aumentar o valor vitalício de cada lead.", pct: "92%" }
+                ].map((item, i) => (
+                  <motion.div 
+                    key={i} 
+                    initial={{ opacity: 0, x: -20 }}
+                    whileInView={{ opacity: 1, x: 0 }}
+                    viewport={{ once: true }}
+                    transition={{ delay: i * 0.15, duration: 0.6 }}
+                    className="group flex gap-4 md:gap-6 p-4 md:p-5 rounded-2xl hover:bg-white/[0.03] transition-all duration-500 border border-transparent hover:border-white/[0.06]"
+                  >
+                    <div className="text-emerald-500 font-mono text-sm md:text-base shrink-0 w-8 h-8 md:w-10 md:h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center font-bold group-hover:bg-emerald-500 group-hover:text-black transition-all duration-500">0{i+1}</div>
+                    <div className="flex-1">
+                      <h4 className="font-bold mb-1.5 uppercase tracking-widest text-[10px] md:text-xs text-white">{item.title}</h4>
+                      <p className="text-zinc-500 text-xs md:text-sm mb-3">{item.desc}</p>
+                      <div className="h-1 w-full bg-white/[0.04] rounded-full overflow-hidden">
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          whileInView={{ width: item.pct }}
+                          viewport={{ once: true }}
+                          transition={{ delay: 0.5 + i * 0.2, duration: 1.2, ease: "easeOut" }}
+                          className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.6)]"
+                        />
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            </motion.div>
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              whileInView={{ opacity: 1, scale: 1 }}
+              viewport={{ once: true }}
+              transition={{ duration: 1 }}
+              className="relative mt-8 lg:mt-0"
+            >
+              <div className="aspect-square rounded-[32px] md:rounded-[40px] border border-emerald-500/20 bg-gradient-to-br from-zinc-900/80 to-black p-8 md:p-12 flex items-center justify-center overflow-hidden group relative card-3d glow-emerald">
+                <div className="absolute inset-0 bg-grid-pattern opacity-30" />
+                <div className="absolute inset-0 bg-emerald-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+                <div className="relative">
+                  <Megaphone className="w-20 h-20 md:w-32 md:h-32 text-emerald-500 animate-float" />
+                  <div className="absolute -inset-8 bg-emerald-500/10 rounded-full blur-3xl opacity-50 animate-pulse" />
+                </div>
+                <div className="absolute bottom-6 md:bottom-10 left-6 md:left-10 right-6 md:right-10 p-4 md:p-6 rounded-xl md:rounded-2xl glass-emerald">
+                  <div className="flex items-center justify-between mb-3 md:mb-4">
+                    <span className="text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-emerald-400">Tráfego de Alta Performance</span>
+                    <TrendingUp className="w-4 h-4 text-emerald-500" />
+                  </div>
+                  <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                    <motion.div 
+                      initial={{ width: 0 }}
+                      whileInView={{ width: "100%" }}
+                      viewport={{ once: true }}
+                      transition={{ duration: 2, ease: "easeOut" }}
+                      className="h-full bg-gradient-to-r from-emerald-600 to-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.8)] rounded-full"
+                    />
+                  </div>
+                  <p className="mt-3 md:mt-4 text-[10px] md:text-xs font-mono text-emerald-400">ROI Escalável</p>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        </section>
+
+        {/* Sales Engine - Premium */}
+        <section id="engine" className="py-10 md:py-40 px-5 md:px-8 overflow-hidden relative">
+          <div className="absolute inset-0 bg-grid-pattern opacity-40 pointer-events-none" />
+          <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-emerald-500/[0.03] rounded-full blur-[150px] pointer-events-none" />
+          <div className="max-w-7xl mx-auto relative">
+            <div className="grid lg:grid-cols-5 gap-8 md:gap-16 items-center">
+              <div className="lg:col-span-2">
+                <motion.div {...fadeInUp}>
+                  <span className="text-[9px] md:text-[10px] font-black uppercase tracking-[0.4em] text-emerald-500 mb-3 md:mb-6 block">The Sales Engine</span>
+                  <h2 className="text-3xl md:text-6xl font-light tracking-[-0.03em] mb-3 md:mb-8 leading-tight font-serif">
+                    Contratos <br /> 
+                    <span className="italic text-gradient-animated font-bold">Fechados</span> Diariamente.
+                  </h2>
+                  <p className="text-zinc-400 text-sm md:text-lg mb-5 md:mb-10 leading-relaxed font-light">
+                    Meu foco não é apenas gerar leads, mas garantir que sua equipe comercial tenha contratos para assinar todos os dias. É a união entre tráfego qualificado e estratégia de fechamento.
+                  </p>
+                  
+                  <ul className="space-y-4 md:space-y-6 mb-8 md:mb-12">
+                    {[
+                      { icon: <Zap className="w-5 h-5" />, text: "Escala agressiva com foco em ROI positivo." },
+                      { icon: <Shield className="w-5 h-5" />, text: "Blindagem de conta e contingência profissional." },
+                      { icon: <Star className="w-5 h-5" />, text: "Alta conversão de clientes em contratos fixos." }
+                    ].map((item, i) => (
+                      <motion.li 
+                        key={i} 
+                        initial={{ opacity: 0, x: -15 }}
+                        whileInView={{ opacity: 1, x: 0 }}
+                        viewport={{ once: true }}
+                        transition={{ delay: i * 0.1 }}
+                        className="flex items-center gap-4 text-sm font-medium text-zinc-300"
+                      >
+                        <div className="w-10 h-10 rounded-xl glass border border-emerald-500/10 flex items-center justify-center text-emerald-500 shrink-0">
+                          {item.icon}
+                        </div>
+                        {item.text}
+                      </motion.li>
+                    ))}
+                  </ul>
+
+                  <button 
+                    onClick={openModal}
+                    className="group relative inline-flex items-center justify-center w-full sm:w-auto gap-4 bg-white/[0.04] border border-white/10 px-6 py-4 md:px-8 md:py-5 rounded-2xl text-[10px] md:text-[11px] font-black uppercase tracking-[0.2em] md:tracking-[0.3em] hover:border-emerald-500/40 transition-all duration-500 overflow-hidden"
+                  >
+                    <span className="relative z-10 group-hover:text-black transition-colors duration-500">Quero esses resultados no meu caixa</span>
+                    <ArrowRight className="w-4 h-4 group-hover:translate-x-2 transition-all relative z-10 group-hover:text-black duration-500" />
+                    <div className="absolute inset-0 bg-emerald-500 translate-y-full group-hover:translate-y-0 transition-transform duration-500" />
+                  </button>
+                </motion.div>
+              </div>
+
+              <div className="lg:col-span-3 grid grid-cols-1 gap-4 mt-8 lg:mt-0">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    whileInView={{ opacity: 1, scale: 1 }}
+                    viewport={{ once: true }}
+                    transition={{ duration: 1 }}
+                    className="aspect-[3/4] rounded-[24px] md:rounded-[32px] overflow-hidden border border-white/[0.06] relative group glass p-6 md:p-8 flex flex-col justify-between hover:border-emerald-500/20 transition-all duration-700"
+                  >
+                    <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/[0.03] to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+                    <div className="relative">
+                      <div className="text-[9px] md:text-[10px] font-black uppercase tracking-widest text-emerald-500">Contratos Assinados</div>
+                    </div>
+                    <div className="relative">
+                      <div className="text-4xl md:text-5xl font-light tracking-tighter font-mono text-white text-glow-white">R$ 120k+</div>
+                    </div>
+                    <div className="relative text-[10px] md:text-xs text-zinc-500 leading-relaxed font-medium">Faturamento médio mensal por cliente fixo</div>
+                  </motion.div>
+                  
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    whileInView={{ opacity: 1, scale: 1 }}
+                    viewport={{ once: true }}
+                    transition={{ duration: 1, delay: 0.2 }}
+                    className="aspect-[3/4] rounded-[24px] md:rounded-[32px] overflow-hidden relative group bg-emerald-500 p-6 md:p-8 flex flex-col justify-between text-black glow-emerald-strong"
+                  >
+                    <div className="text-[9px] md:text-[10px] font-black uppercase tracking-widest opacity-60">Taxa de Conversão</div>
+                    <div className="text-4xl md:text-5xl font-light tracking-tighter font-mono">24.8%</div>
+                    <div className="text-[10px] md:text-xs font-bold leading-relaxed">Média de fechamento em funis diretos</div>
+                  </motion.div>
+                </div>
+                
+                <motion.div 
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 1, delay: 0.4 }}
+                  className="w-full h-[300px] md:h-[400px] rounded-[24px] md:rounded-[32px] border border-white/[0.06] glass p-6 md:p-8 relative overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-grid-pattern opacity-20" />
+                  <div className="flex items-center justify-between mb-8 relative">
+                    <div>
+                      <h3 className="text-lg font-bold tracking-tight">Escala de Faturamento</h3>
+                      <p className="text-[10px] text-zinc-500 uppercase tracking-widest">Crescimento projetado em 6 meses</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-500">Live Data</span>
+                    </div>
+                  </div>
+
+                  <div className="w-full h-[200px] md:h-[280px] relative">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={chartData}>
+                        <defs>
+                          <linearGradient id="colorRev" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.4}/>
+                            <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#ffffff06" vertical={false} />
+                        <XAxis 
+                          dataKey="month" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fill: '#71717a', fontSize: 10 }}
+                          dy={10}
+                        />
+                        <YAxis hide />
+                        <Tooltip content={<CustomTooltip />} />
+                        <Area 
+                          type="monotone" 
+                          dataKey="revenue" 
+                          stroke="#10b981" 
+                          strokeWidth={3}
+                          fillOpacity={1} 
+                          fill="url(#colorRev)" 
+                          animationDuration={2000}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </motion.div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Results - Premium Impact */}
+        <section id="results" className="py-10 md:py-40 border-y border-white/[0.04] relative overflow-hidden">
+          <div className="absolute inset-0 bg-radial-gradient pointer-events-none" />
+          <div className="max-w-7xl mx-auto px-6 md:px-8 relative">
+            <motion.div {...fadeInUp} className="text-center mb-8 md:mb-24">
+              <span className="text-[9px] md:text-[10px] font-black uppercase tracking-[0.4em] text-emerald-500 mb-4 block">Prova de Resultados</span>
+              <h2 className="text-3xl md:text-6xl font-light tracking-[-0.03em] mb-2 md:mb-4 font-serif">Impacto <span className="text-gradient-animated italic font-bold">no Caixa</span></h2>
+              <p className="text-zinc-500 uppercase tracking-[0.2em] md:tracking-[0.3em] text-[9px] md:text-[10px] font-bold">Resultados reais de operações geridas por Lucas Constantino</p>
+            </motion.div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-8">
+              {[
+                { val: "R$ 3.8M", label: "Investimento Gerido", sub: "Com ROI médio de 5.4x", icon: <TrendingUp className="w-5 h-5" /> },
+                { val: "24/7", label: "Vendas Ativas", sub: "Fechamentos diários garantidos", icon: <Zap className="w-5 h-5" /> },
+                { val: "92%", label: "Retenção de Clientes", sub: "Foco em contratos fixos e LTV", icon: <Shield className="w-5 h-5" /> }
+              ].map((stat, i) => (
+                <motion.div 
+                  key={i}
+                  initial={{ opacity: 0, y: 30 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ delay: i * 0.15, duration: 0.7 }}
+                  whileHover={{ y: -8, transition: { duration: 0.3 } }}
+                  className="group p-6 md:p-12 rounded-[20px] md:rounded-[32px] border border-white/[0.06] glass text-center relative overflow-hidden hover:border-emerald-500/20 transition-all duration-700"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-b from-emerald-500/[0.04] to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+                  <div className="relative">
+                    <div className="w-10 h-10 md:w-12 md:h-12 rounded-xl md:rounded-2xl glass-emerald flex items-center justify-center text-emerald-500 mx-auto mb-4 md:mb-6">
+                      {stat.icon}
+                    </div>
+                    <div className="text-3xl md:text-5xl font-light mb-2 md:mb-4 tracking-tighter font-mono text-gradient-white">{stat.val}</div>
+                    <div className="text-[10px] md:text-[11px] font-bold uppercase tracking-[0.2em] text-emerald-500 mb-1 md:mb-2">{stat.label}</div>
+                    <div className="text-[10px] md:text-xs text-zinc-600 italic mb-5 md:mb-10 font-serif">{stat.sub}</div>
+                    <button 
+                      onClick={openModal}
+                      className="w-full py-3.5 md:py-4 rounded-xl border border-emerald-500/20 text-emerald-500 text-[10px] font-black uppercase tracking-[0.2em] hover:bg-emerald-500 hover:text-black hover:shadow-[0_0_30px_rgba(16,185,129,0.25)] transition-all duration-500 flex items-center justify-center gap-2 group/btn"
+                    >
+                      Diagnosticar Escala
+                      <ArrowRight className="w-3 h-3 group-hover/btn:translate-x-1 transition-transform" />
+                    </button>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Final CTA - Irresistible */}
+        <section id="apply" className="py-10 md:py-48 px-5 md:px-8 relative overflow-hidden">
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-emerald-500/[0.04] rounded-full blur-[200px] pointer-events-none" />
+          <div className="max-w-4xl mx-auto text-center relative">
+            <motion.div {...fadeInUp}>
+              <h2 className="text-4xl md:text-[7rem] font-light tracking-[-0.04em] mb-5 md:mb-14 leading-[0.88] font-serif">
+                <span className="text-gradient-white">Sua Escala</span> <br /> <span className="italic text-gradient-animated font-bold">Começa Aqui.</span>
+              </h2>
+              <p className="text-zinc-400 text-base md:text-xl mb-8 md:mb-16 max-w-2xl mx-auto leading-relaxed px-2 md:px-4 font-light">
+                Não aceito qualquer projeto. Busco empresas com produto validado que desejam dominar o mercado através de tráfego de alta conversão.
+              </p>
+            </motion.div>
+            
+            <motion.div 
+              initial={{ opacity: 0, y: 40 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.8 }}
+              className="inline-flex flex-col items-center w-full max-w-xl p-6 md:p-16 rounded-[24px] md:rounded-[48px] border border-emerald-500/20 glass-emerald relative overflow-hidden group animate-glow-pulse"
+            >
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-40 h-1 bg-gradient-to-r from-transparent via-emerald-500 to-transparent rounded-b-full" />
+              <div className="absolute inset-0 bg-gradient-to-b from-emerald-500/[0.05] to-transparent pointer-events-none" />
+              
+              <div className="flex gap-1.5 mb-6 md:mb-8 relative">
+                {[1,2,3,4,5].map(i => (
+                  <Star key={i} className="w-5 h-5 text-emerald-500 fill-current shrink-0 drop-shadow-[0_0_6px_rgba(16,185,129,0.6)]" style={{ animationDelay: `${i * 0.2}s` }} />
+                ))}
+              </div>
+              
+              <div className="mb-6 md:mb-8 relative">
+                <span className="inline-flex items-center gap-2.5 bg-emerald-500 text-black text-[10px] font-black px-6 py-2.5 rounded-full uppercase tracking-[0.2em] shadow-[0_0_40px_rgba(16,185,129,0.4)] animate-breathe">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-black/50" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-black" />
+                  </span>
+                  Últimas 02 Vagas Disponíveis
+                </span>
+              </div>
+              
+              <h3 className="text-2xl md:text-3xl font-bold mb-8 md:mb-10 tracking-tighter relative">Pronto para dominar seu mercado?</h3>
+              
+              <button 
+                onClick={openModal}
+                className="w-full bg-emerald-500 text-black px-5 md:px-16 py-4 md:py-8 rounded-full font-black text-[10px] md:text-sm uppercase tracking-[0.15em] md:tracking-[0.3em] hover:scale-105 active:scale-[0.98] transition-all duration-500 flex items-center justify-center gap-2 md:gap-4 group/cta cursor-pointer shadow-[0_20px_60px_rgba(16,185,129,0.3)] btn-shine relative"
+              >
+                Garantir Vaga na Consultoria Privada
+                <ArrowUpRight className="w-5 h-5 md:w-6 md:h-6 group-hover/cta:translate-x-1 group-hover/cta:-translate-y-1 transition-transform shrink-0" />
+              </button>
+              
+              <p className="mt-6 md:mt-8 text-[9px] md:text-[10px] text-zinc-500 uppercase tracking-[0.3em] font-bold relative">Conversa direta e exclusiva com Lucas Constantino</p>
+            </motion.div>
+          </div>
+        </section>
+      </main>
+
+      {/* Footer - Premium */}
+      <footer className="py-12 md:py-28 px-5 md:px-8 border-t border-white/[0.04] relative mb-14 lg:mb-0">
+        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-emerald-500/20 to-transparent" />
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start gap-12 md:gap-16">
+          <div className="max-w-xs">
+            <div className="flex items-center gap-3 mb-8">
+              <div className="w-8 h-8 border border-emerald-500/30 rounded-full flex items-center justify-center relative">
+                <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
+              </div>
+              <span className="text-lg font-bold tracking-[0.25em] uppercase text-gradient-white">Constantino</span>
+            </div>
+            <p className="text-zinc-600 text-sm leading-relaxed">
+              Estratégia de Tráfego e Vendas de Alta Performance.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-16">
+            <div>
+              <h4 className="text-[10px] font-bold uppercase tracking-[0.3em] text-zinc-400 mb-8">Contato</h4>
+              <ul className="space-y-4 text-sm text-zinc-600">
+                <li><a href="#" className="hover-line hover:text-emerald-400 transition-colors duration-300">WhatsApp Business</a></li>
+                <li><a href="#" className="hover-line hover:text-emerald-400 transition-colors duration-300">Instagram Direct</a></li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="text-[10px] font-bold uppercase tracking-[0.3em] text-zinc-400 mb-8">Legal</h4>
+              <ul className="space-y-4 text-sm text-zinc-600">
+                <li><a href="#" className="hover-line hover:text-emerald-400 transition-colors duration-300">Política de Privacidade</a></li>
+                <li><a href="#" className="hover-line hover:text-emerald-400 transition-colors duration-300">Termos de Uso</a></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        
+        <div className="max-w-7xl mx-auto mt-20 md:mt-32 pt-8 md:pt-12 border-t border-white/[0.04] flex flex-col md:flex-row justify-center md:justify-between items-center gap-4 text-center text-[9px] text-zinc-700 font-bold uppercase tracking-[0.4em]">
+          <p>© 2026 Lucas Constantino. Todos os direitos reservados.</p>
+          <p className="text-emerald-500/40">Focado em ROI.</p>
+        </div>
+      </footer>
+    </div>
+    </ThemeProvider>
+  );
+}
+
+
+=======================================================
+Arquivo: src\components\DottedSurface.tsx
+=======================================================
+
+'use client';
+import { cn } from '@/lib/utils';
+import React, { useEffect, useRef } from 'react';
+import * as THREE from 'three';
+
+type DottedSurfaceProps = Omit<React.ComponentProps<'div'>, 'ref'>;
+
+// Helper to create a glowing circle texture for soft blurred particles
+const createParticleTexture = () => {
+	const canvas = document.createElement('canvas');
+	canvas.width = 32;
+	canvas.height = 32;
+	const context = canvas.getContext('2d');
+	if (context) {
+		const gradient = context.createRadialGradient(16, 16, 0, 16, 16, 16);
+		gradient.addColorStop(0, 'rgba(255,255,255,1)');
+		gradient.addColorStop(0.3, 'rgba(255,255,255,0.7)');
+		gradient.addColorStop(0.8, 'rgba(255,255,255,0.1)');
+		gradient.addColorStop(1, 'rgba(0,0,0,0)');
+		context.fillStyle = gradient;
+		context.fillRect(0, 0, 32, 32);
+	}
+	return new THREE.CanvasTexture(canvas);
+};
+
+export function DottedSurface({ className, ...props }: DottedSurfaceProps) {
+	const containerRef = useRef<HTMLDivElement>(null);
+	const mouseRef = useRef({ x: 0, y: 0 });
+	const sceneRef = useRef<{
+		scene: THREE.Scene;
+		camera: THREE.PerspectiveCamera;
+		renderer: THREE.WebGLRenderer;
+		particles: THREE.Points;
+		animationId: number;
+		velocities: number[];
+		windOffsets: number[];
+	} | null>(null);
+
+	useEffect(() => {
+		if (!containerRef.current) return;
+
+		const PARTICLE_COUNT = 1200; 
+		const BOUND_X = 4000;
+		const BOUND_Y = 3000;
+		const BOUND_Z = 2000;
+
+		// Scene setup
+		const scene = new THREE.Scene();
+
+		const camera = new THREE.PerspectiveCamera(
+			60,
+			window.innerWidth / window.innerHeight,
+			1,
+			10000,
+		);
+		camera.position.set(0, 0, 800);
+
+		const renderer = new THREE.WebGLRenderer({
+			alpha: true,
+			antialias: true,
+		});
+		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+		renderer.setSize(window.innerWidth, window.innerHeight);
+		renderer.setClearColor(0x000000, 0);
+		
+		// Add a cinematic global blur to simulate depth of field (some sparks sharp, some blurry)
+		renderer.domElement.style.filter = 'blur(1px)';
+
+		containerRef.current.appendChild(renderer.domElement);
+
+		// Create spark particles
+		const positions: number[] = [];
+		const colors: number[] = [];
+		const sizes: number[] = [];
+		const velocities: number[] = [];
+		const windOffsets: number[] = [];
+
+		const geometry = new THREE.BufferGeometry();
+		const particleTexture = createParticleTexture();
+
+		for (let i = 0; i < PARTICLE_COUNT; i++) {
+			const x = (Math.random() - 0.5) * BOUND_X;
+			const y = (Math.random() - 0.5) * BOUND_Y * 2; 
+			const z = (Math.random() - 0.5) * BOUND_Z;
+
+			positions.push(x, y, z);
+			
+			// Fire ember green colors (varied from deep emerald to bright neon)
+			const intensity = 0.4 + Math.random() * 0.6;
+			const r = 0.05 + (Math.random() * 0.05); // slight yellow/red mix for fire
+			const g = 0.8 * intensity + 0.1; // strong green
+			const b = 0.4 * intensity; // low blue
+			
+			colors.push(r, g, b);
+			
+			// Sizes vary dramatically to create "blur" illusion for big ones close to camera
+			const isLarge = Math.random() > 0.85;
+			sizes.push(isLarge ? 12 + Math.random() * 20 : 3 + Math.random() * 8);
+			
+			// Velocity (Fire thermal drift - organic speeds)
+			velocities.push(1.0 + Math.random() * 3.5);
+			
+			// Wind offset for individual organic swaying
+			windOffsets.push(Math.random() * Math.PI * 2);
+		}
+
+		geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+		geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+		geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+		const material = new THREE.PointsMaterial({
+			size: 15,
+			vertexColors: true,
+			transparent: true,
+			opacity: 0.6,
+			sizeAttenuation: true,
+			blending: THREE.AdditiveBlending, // Fire glow mode
+			depthWrite: false, 
+			map: particleTexture // Soft circular shape instead of sharp squares
+		});
+
+		const points = new THREE.Points(geometry, material);
+		scene.add(points);
+
+		let animationId: number;
+		let time = 0;
+
+		const handleMouseMove = (e: MouseEvent) => {
+			mouseRef.current.x = (e.clientX / window.innerWidth) * 2 - 1;
+			mouseRef.current.y = -(e.clientY / window.innerHeight) * 2 + 1;
+		};
+		window.addEventListener('mousemove', handleMouseMove);
+
+		// Initialize sceneRef immediately so we can store animationId directly to it
+		sceneRef.current = {
+			scene,
+			camera,
+			renderer,
+			particles: points,
+			animationId: 0,
+			velocities,
+			windOffsets
+		};
+
+		const animate = () => {
+			if (!sceneRef.current) return;
+			sceneRef.current.animationId = requestAnimationFrame(animate);
+			time += 0.005;
+
+			const posAttribute = geometry.attributes.position;
+			const colAttribute = geometry.attributes.color;
+			const posArray = posAttribute.array as Float32Array;
+			const colArray = colAttribute.array as Float32Array;
+
+			const mx = mouseRef.current.x;
+			const my = mouseRef.current.y;
+
+			// Update particles like fire embers
+			for (let i = 0; i < PARTICLE_COUNT; i++) {
+				const i3 = i * 3;
+
+				// Thermal up-draft
+				posArray[i3 + 1] += velocities[i];
+
+				// Organic wind sway (using sine waves and their unique offset)
+				const windX = Math.sin(time + windOffsets[i]) * 1.5;
+				const windZ = Math.cos(time * 0.8 + windOffsets[i]) * 1.0;
+				
+				posArray[i3] += windX;
+				posArray[i3 + 2] += windZ;
+
+				// If spark goes too high, reset to bottom like a new ember
+				if (posArray[i3 + 1] > BOUND_Y) {
+					posArray[i3 + 1] = -BOUND_Y;
+					posArray[i3] = (Math.random() - 0.5) * BOUND_X;
+					posArray[i3 + 2] = (Math.random() - 0.5) * BOUND_Z;
+				}
+
+				// Ember flicker (gentle glowing pulse)
+				const flicker = 0.5 + Math.abs(Math.sin(time * 3 + windOffsets[i])) * 0.5;
+				const baseIntensity = 0.5 + (i % 5) * 0.15; 
+				colArray[i3] = 0.05 * flicker * baseIntensity;
+				colArray[i3 + 1] = 0.8 * flicker * baseIntensity;
+				colArray[i3 + 2] = 0.3 * flicker * baseIntensity;
+			}
+
+			posAttribute.needsUpdate = true;
+			colAttribute.needsUpdate = true;
+
+			// Camera sways slightly like moving around a campfire
+			camera.position.x += (mx * 150 - camera.position.x) * 0.02;
+			camera.position.y += (my * 100 - camera.position.y) * 0.02;
+			camera.lookAt(0, 0, 0);
+
+			renderer.render(scene, camera);
+		};
+
+		const handleResize = () => {
+			camera.aspect = window.innerWidth / window.innerHeight;
+			camera.updateProjectionMatrix();
+			renderer.setSize(window.innerWidth, window.innerHeight);
+		};
+
+		window.addEventListener('resize', handleResize);
+		animate();
+
+		return () => {
+			window.removeEventListener('resize', handleResize);
+			window.removeEventListener('mousemove', handleMouseMove);
+
+			if (sceneRef.current) {
+				cancelAnimationFrame(sceneRef.current.animationId);
+
+				sceneRef.current.scene.traverse((object) => {
+					if (object instanceof THREE.Points) {
+						object.geometry.dispose();
+						if (Array.isArray(object.material)) {
+							object.material.forEach((mat) => mat.dispose());
+						} else {
+							object.material.dispose();
+						}
+					}
+				});
+
+				particleTexture.dispose();
+				sceneRef.current.renderer.dispose();
+
+				if (containerRef.current && sceneRef.current.renderer.domElement) {
+					containerRef.current.removeChild(sceneRef.current.renderer.domElement);
+				}
+			}
+		};
+	}, []);
+
+	return (
+		<div
+			ref={containerRef}
+			className={cn('pointer-events-none fixed top-0 left-0 w-screen h-screen overflow-hidden z-[-1] bg-[#050505]', className)}
+			{...props}
+		/>
+	);
+}
+
+
+=======================================================
+Arquivo: src\components\FloatingBackground.tsx
+=======================================================
+
+import React, { useEffect, useState } from 'react';
+import { motion } from 'motion/react';
+import { DollarSign, TrendingUp, Briefcase, Coins, LineChart, PieChart, Wallet, Landmark } from 'lucide-react';
+
+const ICONS = [DollarSign, TrendingUp, Briefcase, Coins, LineChart, PieChart, Wallet, Landmark];
+
+const Taximeter = ({ size }: { size: number }) => {
+  const [value, setValue] = useState(Math.random() * 5000 + 1000);
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setValue(prev => prev + Math.random() * 50);
+    }, 150);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <span style={{ fontSize: size * 0.6 }} className="font-mono font-bold whitespace-nowrap">
+      R$ {value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+    </span>
+  );
+};
+
+const FloatingElement = ({ id, total }: { id: number, total: number }) => {
+  const isIcon = Math.random() > 0.4;
+  const isTaximeter = !isIcon && Math.random() > 0.5;
+  const Icon = ICONS[Math.floor(Math.random() * ICONS.length)];
+  
+  // Distribute evenly across a grid to ensure they are spread out
+  const cols = Math.ceil(Math.sqrt(total * (16/9))); // Aspect ratio adjustment for typical screens
+  const rows = Math.ceil(total / cols);
+  
+  const col = id % cols;
+  const row = Math.floor(id / cols);
+  
+  const cellWidth = 120 / cols;
+  const cellHeight = 120 / rows;
+  
+  // Start position within its grid cell (with some overflow -10vw to 110vw)
+  const startX = -10 + (col * cellWidth) + (Math.random() * cellWidth);
+  const startY = -10 + (row * cellHeight) + (Math.random() * cellHeight);
+  
+  const directionType = Math.floor(Math.random() * 3);
+  let endX = startX;
+  let endY = startY;
+  
+  const distance = 30 + Math.random() * 50;
+  
+  if (directionType === 0) {
+    // Horizontal
+    endX = startX + (Math.random() > 0.5 ? distance : -distance);
+    endY = startY + (Math.random() * 20 - 10);
+  } else if (directionType === 1) {
+    // Vertical
+    endX = startX + (Math.random() * 20 - 10);
+    endY = startY + (Math.random() > 0.5 ? distance : -distance);
+  } else {
+    // Diagonal
+    endX = startX + (Math.random() > 0.5 ? distance : -distance);
+    endY = startY + (Math.random() > 0.5 ? distance : -distance);
+  }
+
+  const duration = 20 + Math.random() * 40; // 20s to 60s
+  const delay = Math.random() * -60; // Negative delay so they start already in motion
+  const size = 30 + Math.random() * 80; 
+  const blur = 3 + Math.random() * 10; 
+  const opacity = 0.03 + Math.random() * 0.15; 
+
+  return (
+    <motion.div
+      className="absolute pointer-events-none select-none flex items-center justify-center text-emerald-500"
+      initial={{ 
+        x: `${startX}vw`, 
+        y: `${startY}vh`,
+        opacity: 0,
+        rotate: Math.random() * 360
+      }}
+      animate={{ 
+        x: [`${startX}vw`, `${endX}vw`], 
+        y: [`${startY}vh`, `${endY}vh`],
+        opacity: [0, opacity, opacity, 0],
+        rotate: Math.random() * 360 + (Math.random() > 0.5 ? 360 : -360)
+      }}
+      transition={{ 
+        duration, 
+        repeat: Infinity, 
+        ease: "linear",
+        delay
+      }}
+      style={{
+        filter: `blur(${blur}px)`,
+        zIndex: 0
+      }}
+    >
+      {isIcon ? (
+        <Icon size={size} strokeWidth={1.5} />
+      ) : isTaximeter ? (
+        <Taximeter size={size} />
+      ) : (
+        <span style={{ fontSize: size * 0.7 }} className="font-mono font-bold whitespace-nowrap">
+          +{Math.floor(Math.random() * 500)}%
+        </span>
+      )}
+    </motion.div>
+  );
+};
+
+export const FloatingBackground = () => {
+  const [elements, setElements] = useState<number[]>([]);
+  const TOTAL_ELEMENTS = 45;
+
+  useEffect(() => {
+    // Generate elements on client side to avoid hydration mismatch
+    const elms = Array.from({ length: TOTAL_ELEMENTS }, (_, i) => i);
+    setElements(elms);
+  }, []);
+
+  return (
+    <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
+      <div className="absolute inset-0 bg-gradient-to-b from-[#080808] via-transparent to-[#080808] z-10" />
+      {elements.map(id => (
+        <FloatingElement key={id} id={id} total={TOTAL_ELEMENTS} />
+      ))}
+    </div>
+  );
+};
+
+
+=======================================================
+Arquivo: src\components\GiftBoxEntry.tsx
+=======================================================
+
+'use client';
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Gift } from 'lucide-react';
+
+export default function GiftBoxEntry({ onOpen }: { onOpen: () => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  const handleOpen = (e: React.SyntheticEvent) => {
+    if (isOpen) return;
+    e.preventDefault();
+    setIsOpen(true);
+    setTimeout(onOpen, 100);
+  };
+
+  return (
+    <AnimatePresence>
+      {!isOpen && (
+        <motion.div
+          initial={{ opacity: 1 }}
+          exit={{ opacity: 0, scale: 1.5 }}
+          onWheel={handleOpen}
+          onTouchMove={handleOpen}
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black"
+        >
+          <motion.div
+            className="flex flex-col items-center gap-4 text-emerald-500"
+          >
+            <Gift className="w-24 h-24" />
+            <span className="text-sm font-bold uppercase tracking-[0.2em]">Role para baixo para abrir</span>
+            <span className="text-xs text-zinc-400">Diagnóstico de Tráfego Pago</span>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+
+=======================================================
+Arquivo: src\components\GreenSparks.tsx
+=======================================================
+
+import React, { useEffect, useRef } from 'react';
+
+export const GreenSparks: React.FC = () => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let width = window.innerWidth;
+    let height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+
+    class Particle {
+      x: number;
+      y: number;
+      size: number;
+      speedX: number;
+      speedY: number;
+      color: string;
+      blur: number;
+
+      constructor() {
+        this.x = Math.random() * width;
+        this.y = Math.random() * height;
+        this.size = Math.random() * 2 + 0.5;
+        this.speedX = Math.random() * 1.5 - 0.75;
+        this.speedY = Math.random() * -1.5 - 0.5; // Always fly upwards generally
+        
+        // Green spark color variations - emerald/green colors
+        const colors = [
+          'rgba(16, 185, 129, 0.8)', // emerald-500
+          'rgba(52, 211, 153, 0.6)', // emerald-400
+          'rgba(110, 231, 183, 0.9)', // emerald-300
+          'rgba(0, 255, 128, 0.7)'  // bright neon green
+        ];
+        this.color = colors[Math.floor(Math.random() * colors.length)];
+        
+        // Some with blur
+        this.blur = Math.random() > 0.4 ? Math.random() * 4 + 2 : 0;
+      }
+
+      update() {
+        this.x += this.speedX;
+        this.y += this.speedY;
+
+        // Reset if it goes out of bounds
+        if (this.y < 0 || this.x < 0 || this.x > width) {
+          this.y = height + 10;
+          this.x = Math.random() * width;
+        }
+      }
+
+      draw() {
+        if (!ctx) return;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        
+        if (this.blur > 0) {
+          ctx.shadowBlur = this.blur;
+          ctx.shadowColor = this.color;
+        } else {
+          ctx.shadowBlur = 0;
+        }
+        
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        ctx.shadowBlur = 0; // reset for next drawing
+      }
+    }
+
+    let particlesArray: Particle[] = [];
+    const init = () => {
+      particlesArray = [];
+      const numberOfParticles = window.innerWidth < 768 ? 30 : 70;
+      for (let i = 0; i < numberOfParticles; i++) {
+        particlesArray.push(new Particle());
+      }
+    };
+    
+    init();
+
+    let animationFrameId: number;
+    const animate = () => {
+      ctx.clearRect(0, 0, width, height);
+      for (let i = 0; i < particlesArray.length; i++) {
+        particlesArray[i].update();
+        particlesArray[i].draw();
+      }
+      animationFrameId = requestAnimationFrame(animate);
+    };
+
+    animate();
+
+    const handleResize = () => {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width;
+      canvas.height = height;
+      init(); // Reinitialize particles on resize to adjust amount
+    };
+
+    window.addEventListener('resize', handleResize);
+    
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, []);
+
+  return (
+    <canvas 
+      ref={canvasRef} 
+      className="fixed inset-0 pointer-events-none z-0 mix-blend-screen"
+      style={{ opacity: 0.6 }}
+    />
+  );
+};
+
+
+=======================================================
+Arquivo: src\components\RadialOrbitalTimelineDemo.tsx
+=======================================================
+
+"use client";
+
+import { Calendar, Code, FileText, User, Clock } from "lucide-react";
+import RadialOrbitalTimeline from "@/components/ui/radial-orbital-timeline";
+
+const timelineData = [
+  {
+    id: 1,
+    title: "Planning",
+    date: "Jan 2024",
+    content: "Project planning and requirements gathering phase.",
+    category: "Planning",
+    icon: Calendar,
+    relatedIds: [2],
+    status: "completed" as const,
+    energy: 100,
+  },
+  {
+    id: 2,
+    title: "Design",
+    date: "Feb 2024",
+    content: "UI/UX design and system architecture.",
+    category: "Design",
+    icon: FileText,
+    relatedIds: [1, 3],
+    status: "completed" as const,
+    energy: 90,
+  },
+  {
+    id: 3,
+    title: "Development",
+    date: "Mar 2024",
+    content: "Core features implementation and testing.",
+    category: "Development",
+    icon: Code,
+    relatedIds: [2, 4],
+    status: "in-progress" as const,
+    energy: 60,
+  },
+  {
+    id: 4,
+    title: "Testing",
+    date: "Apr 2024",
+    content: "User testing and bug fixes.",
+    category: "Testing",
+    icon: User,
+    relatedIds: [3, 5],
+    status: "pending" as const,
+    energy: 30,
+  },
+  {
+    id: 5,
+    title: "Release",
+    date: "May 2024",
+    content: "Final deployment and release.",
+    category: "Release",
+    icon: Clock,
+    relatedIds: [4],
+    status: "pending" as const,
+    energy: 10,
+  },
+];
+
+export function RadialOrbitalTimelineDemo() {
+  return (
+    <>
+      <RadialOrbitalTimeline timelineData={timelineData} />
+    </>
+  );
+}
+
+export default RadialOrbitalTimelineDemo;
+
+
+=======================================================
+Arquivo: src\components\ShaderLinesDemo.tsx
+=======================================================
+
+import { ShaderAnimation } from "@/components/ui/shader-lines";
+
+export default function ShaderLinesDemo() {
+  return (
+    <div className="relative flex h-[650px] w-full flex-col items-center justify-center overflow-hidden rounded-xl">
+      <ShaderAnimation/>
+      <span className="pointer-events-none z-10 text-center text-7xl leading-none font-semibold tracking-tighter whitespace-pre-wrap text-white">
+        Shader Lines
+      </span>
+    </div>
+  )
+}
+
+
+=======================================================
+Arquivo: src\components\SmoothScroll.tsx
+=======================================================
+
+'use client';
+import React, { useEffect } from 'react';
+import Lenis from '@studio-freight/lenis';
+
+export default function SmoothScroll({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    const lenis = new Lenis({
+      lerp: 0.15,
+      wheelMultiplier: 1.2,
+      touchMultiplier: 1.5,
+      smoothWheel: true,
+    });
+
+    function raf(time: number) {
+      lenis.raf(time);
+      requestAnimationFrame(raf);
+    }
+
+    const rafId = requestAnimationFrame(raf);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      lenis.destroy();
+    };
+  }, []);
+
+  return <>{children}</>;
+}
+
+
+=======================================================
+Arquivo: src\components\ui\badge.tsx
+=======================================================
+
+import * as React from "react"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const badgeVariants = cva(
+  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+  {
+    variants: {
+      variant: {
+        default:
+          "border-transparent bg-primary text-primary-foreground hover:bg-primary/80",
+        secondary:
+          "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        destructive:
+          "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",
+        outline: "text-foreground",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+    },
+  },
+)
+
+export type BadgeProps = React.HTMLAttributes<HTMLDivElement> & VariantProps<typeof badgeVariants>
+
+function Badge({ className, variant, ...props }: BadgeProps) {
+  return (
+    <div className={cn(badgeVariants({ variant }), className)} {...props} />
+  )
+}
+
+export { Badge, badgeVariants }
+
+
+=======================================================
+Arquivo: src\components\ui\button.tsx
+=======================================================
+
+import * as React from "react"
+import { Slot } from "@radix-ui/react-slot"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        destructive:
+          "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        outline:
+          "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-10 px-4 py-2",
+        sm: "h-9 rounded-md px-3",
+        lg: "h-11 rounded-md px-8",
+        icon: "h-10 w-10",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  },
+)
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button"
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  },
+)
+Button.displayName = "Button"
+
+export { Button, buttonVariants }
+
+
+=======================================================
+Arquivo: src\components\ui\card.tsx
+=======================================================
+
+import * as React from "react"
+
+import { cn } from "@/lib/utils"
+
+const Card = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn(
+      "rounded-lg border bg-card text-card-foreground shadow-sm",
+      className,
+    )}
+    {...props}
+  />
+))
+Card.displayName = "Card"
+
+const CardHeader = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex flex-col space-y-1.5 p-6", className)}
+    {...props}
+  />
+))
+CardHeader.displayName = "CardHeader"
+
+const CardTitle = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLHeadingElement>
+>(({ className, ...props }, ref) => (
+  <h3
+    ref={ref}
+    className={cn(
+      "text-2xl font-semibold leading-none tracking-tight",
+      className,
+    )}
+    {...props}
+  />
+))
+CardTitle.displayName = "CardTitle"
+
+const CardDescription = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLParagraphElement>
+>(({ className, ...props }, ref) => (
+  <p
+    ref={ref}
+    className={cn("text-sm text-muted-foreground", className)}
+    {...props}
+  />
+))
+CardDescription.displayName = "CardDescription"
+
+const CardContent = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+))
+CardContent.displayName = "CardContent"
+
+const CardFooter = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex items-center p-6 pt-0", className)}
+    {...props}
+  />
+))
+CardFooter.displayName = "CardFooter"
+
+export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent }
+
+
+=======================================================
+Arquivo: src\components\ui\radial-orbital-timeline.tsx
+=======================================================
+
+"use client";
+import { useState, useEffect, useRef, ElementType, MouseEvent } from "react";
+import { ArrowRight, Link, Zap } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+interface TimelineItem {
+  id: number;
+  title: string;
+  date: string;
+  content: string;
+  category: string;
+  icon: ElementType;
+  relatedIds: number[];
+  status: "completed" | "in-progress" | "pending";
+  energy: number;
+}
+
+interface RadialOrbitalTimelineProps {
+  timelineData: TimelineItem[];
+}
+
+export default function RadialOrbitalTimeline({
+  timelineData,
+}: RadialOrbitalTimelineProps) {
+  const [expandedItems, setExpandedItems] = useState<Record<number, boolean>>(
+    {}
+  );
+  const [viewMode, setViewMode] = useState<"orbital">("orbital");
+  const [rotationAngle, setRotationAngle] = useState<number>(0);
+  const [autoRotate, setAutoRotate] = useState<boolean>(true);
+  const [pulseEffect, setPulseEffect] = useState<Record<number, boolean>>({});
+  const [centerOffset, setCenterOffset] = useState<{ x: number; y: number }>({
+    x: 0,
+    y: 0,
+  });
+  const [activeNodeId, setActiveNodeId] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const orbitRef = useRef<HTMLDivElement>(null);
+  const nodeRefs = useRef<Record<number, HTMLDivElement | null>>({});
+
+  const handleContainerClick = (e: MouseEvent<HTMLDivElement>) => {
+    if (e.target === containerRef.current || e.target === orbitRef.current) {
+      setExpandedItems({});
+      setActiveNodeId(null);
+      setPulseEffect({});
+      setAutoRotate(true);
+    }
+  };
+
+  const toggleItem = (id: number) => {
+    setExpandedItems((prev) => {
+      const newState = { ...prev };
+      Object.keys(newState).forEach((key) => {
+        if (parseInt(key) !== id) {
+          newState[parseInt(key)] = false;
+        }
+      });
+
+      newState[id] = !prev[id];
+
+      if (!prev[id]) {
+        setActiveNodeId(id);
+        setAutoRotate(false);
+
+        const relatedItems = getRelatedItems(id);
+        const newPulseEffect: Record<number, boolean> = {};
+        relatedItems.forEach((relId) => {
+          newPulseEffect[relId] = true;
+        });
+        setPulseEffect(newPulseEffect);
+
+        centerViewOnNode(id);
+      } else {
+        setActiveNodeId(null);
+        setAutoRotate(true);
+        setPulseEffect({});
+      }
+
+      return newState;
+    });
+  };
+
+  useEffect(() => {
+    let rotationTimer: any;
+
+    if (autoRotate && viewMode === "orbital") {
+      rotationTimer = setInterval(() => {
+        setRotationAngle((prev) => {
+          const newAngle = (prev + 0.3) % 360;
+          return Number(newAngle.toFixed(3));
+        });
+      }, 50);
+    }
+
+    return () => {
+      if (rotationTimer) {
+        clearInterval(rotationTimer);
+      }
+    };
+  }, [autoRotate, viewMode]);
+
+  const centerViewOnNode = (nodeId: number) => {
+    if (viewMode !== "orbital" || !nodeRefs.current[nodeId]) return;
+
+    const nodeIndex = timelineData.findIndex((item) => item.id === nodeId);
+    const totalNodes = timelineData.length;
+    const targetAngle = (nodeIndex / totalNodes) * 360;
+
+    setRotationAngle(270 - targetAngle);
+  };
+
+  const calculateNodePosition = (index: number, total: number) => {
+    const angle = ((index / total) * 360 + rotationAngle) % 360;
+    const radius = 200;
+    const radian = (angle * Math.PI) / 180;
+
+    const x = radius * Math.cos(radian) + centerOffset.x;
+    const y = radius * Math.sin(radian) + centerOffset.y;
+
+    const zIndex = Math.round(100 + 50 * Math.cos(radian));
+    const opacity = Math.max(
+      0.4,
+      Math.min(1, 0.4 + 0.6 * ((1 + Math.sin(radian)) / 2))
+    );
+
+    return { x, y, angle, zIndex, opacity };
+  };
+
+  const getRelatedItems = (itemId: number): number[] => {
+    const currentItem = timelineData.find((item) => item.id === itemId);
+    return currentItem ? currentItem.relatedIds : [];
+  };
+
+  const isRelatedToActive = (itemId: number): boolean => {
+    if (!activeNodeId) return false;
+    const relatedItems = getRelatedItems(activeNodeId);
+    return relatedItems.includes(itemId);
+  };
+
+  const getStatusStyles = (status: TimelineItem["status"]): string => {
+    switch (status) {
+      case "completed":
+        return "text-white bg-black border-white";
+      case "in-progress":
+        return "text-black bg-white border-black";
+      case "pending":
+        return "text-white bg-black/40 border-white/50";
+      default:
+        return "text-white bg-black/40 border-white/50";
+    }
+  };
+
+  return (
+    <div
+      className="w-full h-screen flex flex-col items-center justify-center bg-black overflow-hidden"
+      ref={containerRef}
+      onClick={handleContainerClick}
+    >
+      <div className="relative w-full max-w-4xl h-full flex items-center justify-center">
+        <div
+          className="absolute w-full h-full flex items-center justify-center"
+          ref={orbitRef}
+          style={{
+            perspective: "1000px",
+            transform: `translate(${centerOffset.x}px, ${centerOffset.y}px)`,
+          }}
+        >
+          <div className="absolute w-16 h-16 rounded-full bg-gradient-to-br from-purple-500 via-blue-500 to-teal-500 animate-pulse flex items-center justify-center z-10">
+            <div className="absolute w-20 h-20 rounded-full border border-white/20 animate-ping opacity-70"></div>
+            <div
+              className="absolute w-24 h-24 rounded-full border border-white/10 animate-ping opacity-50"
+              style={{ animationDelay: "0.5s" }}
+            ></div>
+            <div className="w-8 h-8 rounded-full bg-white/80 backdrop-blur-md"></div>
+          </div>
+
+          <div className="absolute w-96 h-96 rounded-full border border-white/10"></div>
+
+          {timelineData.map((item, index) => {
+            const position = calculateNodePosition(index, timelineData.length);
+            const isExpanded = expandedItems[item.id];
+            const isRelated = isRelatedToActive(item.id);
+            const isPulsing = pulseEffect[item.id];
+            const Icon = item.icon;
+
+            const nodeStyle = {
+              transform: `translate(${position.x}px, ${position.y}px)`,
+              zIndex: isExpanded ? 200 : position.zIndex,
+              opacity: isExpanded ? 1 : position.opacity,
+            };
+
+            return (
+              <div
+                key={item.id}
+                ref={(el) => (nodeRefs.current[item.id] = el)}
+                className="absolute transition-all duration-700 cursor-pointer"
+                style={nodeStyle}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleItem(item.id);
+                }}
+              >
+                <div
+                  className={`absolute rounded-full -inset-1 ${
+                    isPulsing ? "animate-pulse duration-1000" : ""
+                  }`}
+                  style={{
+                    background: `radial-gradient(circle, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0) 70%)`,
+                    width: `${item.energy * 0.5 + 40}px`,
+                    height: `${item.energy * 0.5 + 40}px`,
+                    left: `-${(item.energy * 0.5 + 40 - 40) / 2}px`,
+                    top: `-${(item.energy * 0.5 + 40 - 40) / 2}px`,
+                  }}
+                ></div>
+
+                <div
+                  className={`
+                  w-10 h-10 rounded-full flex items-center justify-center
+                  ${
+                    isExpanded
+                      ? "bg-white text-black"
+                      : isRelated
+                      ? "bg-white/50 text-black"
+                      : "bg-black text-white"
+                  }
+                  border-2 
+                  ${
+                    isExpanded
+                      ? "border-white shadow-lg shadow-white/30"
+                      : isRelated
+                      ? "border-white animate-pulse"
+                      : "border-white/40"
+                  }
+                  transition-all duration-300 transform
+                  ${isExpanded ? "scale-150" : ""}
+                `}
+                >
+                  <Icon size={16} />
+                </div>
+
+                <div
+                  className={`
+                  absolute top-12  whitespace-nowrap
+                  text-xs font-semibold tracking-wider
+                  transition-all duration-300
+                  ${isExpanded ? "text-white scale-125" : "text-white/70"}
+                `}
+                >
+                  {item.title}
+                </div>
+
+                {isExpanded && (
+                  <Card className="absolute top-20 left-1/2 -translate-x-1/2 w-64 bg-black/90 backdrop-blur-lg border-white/30 shadow-xl shadow-white/10 overflow-visible">
+                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 w-px h-3 bg-white/50"></div>
+                    <CardHeader className="pb-2">
+                      <div className="flex justify-between items-center">
+                        <Badge
+                          className={`px-2 text-xs ${getStatusStyles(
+                            item.status
+                          )}`}
+                        >
+                          {item.status === "completed"
+                            ? "COMPLETE"
+                            : item.status === "in-progress"
+                            ? "IN PROGRESS"
+                            : "PENDING"}
+                        </Badge>
+                        <span className="text-xs font-mono text-white/50">
+                          {item.date}
+                        </span>
+                      </div>
+                      <CardTitle className="text-sm mt-2">
+                        {item.title}
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-xs text-white/80">
+                      <p>{item.content}</p>
+
+                      <div className="mt-4 pt-3 border-t border-white/10">
+                        <div className="flex justify-between items-center text-xs mb-1">
+                          <span className="flex items-center">
+                            <Zap size={10} className="mr-1" />
+                            Energy Level
+                          </span>
+                          <span className="font-mono">{item.energy}%</span>
+                        </div>
+                        <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-purple-500"
+                            style={{ width: `${item.energy}%` }}
+                          ></div>
+                        </div>
+                      </div>
+
+                      {item.relatedIds.length > 0 && (
+                        <div className="mt-4 pt-3 border-t border-white/10">
+                          <div className="flex items-center mb-2">
+                            <Link size={10} className="text-white/70 mr-1" />
+                            <h4 className="text-xs uppercase tracking-wider font-medium text-white/70">
+                              Connected Nodes
+                            </h4>
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {item.relatedIds.map((relatedId) => {
+                              const relatedItem = timelineData.find(
+                                (i) => i.id === relatedId
+                              );
+                              return (
+                                <Button
+                                  key={relatedId}
+                                  variant="outline"
+                                  size="sm"
+                                  className="flex items-center h-6 px-2 py-0 text-xs rounded-none border-white/20 bg-transparent hover:bg-white/10 text-white/80 hover:text-white transition-all"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleItem(relatedId);
+                                  }}
+                                >
+                                  {relatedItem?.title}
+                                  <ArrowRight
+                                    size={8}
+                                    className="ml-1 text-white/60"
+                                  />
+                                </Button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+=======================================================
+Arquivo: src\components\ui\shader-lines.tsx
+=======================================================
+
+"use client"
+
+import { useEffect, useRef } from "react"
+
+declare global {
+  interface Window {
+    THREE: any
+  }
+}
+
+export function ShaderAnimation() {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const sceneRef = useRef<{
+    camera: any
+    scene: any
+    renderer: any
+    uniforms: any
+    animationId: number | null
+  }>({
+    camera: null,
+    scene: null,
+    renderer: null,
+    uniforms: null,
+    animationId: null,
+  })
+
+  useEffect(() => {
+    // Load Three.js dynamically
+    const script = document.createElement("script")
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/three.js/89/three.min.js"
+    script.onload = () => {
+      if (containerRef.current && window.THREE) {
+        initThreeJS()
+      }
+    }
+    document.head.appendChild(script)
+
+    return () => {
+      // Cleanup
+      if (sceneRef.current.animationId) {
+        cancelAnimationFrame(sceneRef.current.animationId)
+      }
+      if (sceneRef.current.renderer) {
+        sceneRef.current.renderer.dispose()
+      }
+      document.head.removeChild(script)
+    }
+  }, [])
+
+  const initThreeJS = () => {
+    if (!containerRef.current || !window.THREE) return
+
+    const THREE = window.THREE
+    const container = containerRef.current
+
+    // Clear any existing content
+    container.innerHTML = ""
+
+    // Initialize camera
+    const camera = new THREE.Camera()
+    camera.position.z = 1
+
+    // Initialize scene
+    const scene = new THREE.Scene()
+
+    // Create geometry
+    const geometry = new THREE.PlaneBufferGeometry(2, 2)
+
+    // Define uniforms
+    const uniforms = {
+      time: { type: "f", value: 1.0 },
+      resolution: { type: "v2", value: new THREE.Vector2() },
+    }
+
+    // Vertex shader
+    const vertexShader = `
+      void main() {
+        gl_Position = vec4( position, 1.0 );
+      }
+    `
+
+    // Fragment shader
+    const fragmentShader = `
+      #define TWO_PI 6.2831853072
+      #define PI 3.14159265359
+
+      precision highp float;
+      uniform vec2 resolution;
+      uniform float time;
+        
+      float random (in float x) {
+          return fract(sin(x)*1e4);
+      }
+      float random (vec2 st) {
+          return fract(sin(dot(st.xy,
+                               vec2(12.9898,78.233)))*
+              43758.5453123);
+      }
+      
+      varying vec2 vUv;
+
+      void main(void) {
+        vec2 uv = (gl_FragCoord.xy * 2.0 - resolution.xy) / min(resolution.x, resolution.y);
+        
+        vec2 fMosaicScal = vec2(4.0, 2.0);
+        vec2 vScreenSize = vec2(256,256);
+        uv.x = floor(uv.x * vScreenSize.x / fMosaicScal.x) / (vScreenSize.x / fMosaicScal.x);
+        uv.y = floor(uv.y * vScreenSize.y / fMosaicScal.y) / (vScreenSize.y / fMosaicScal.y);       
+          
+        float t = time*0.06+random(uv.x)*0.4;
+        float lineWidth = 0.0008;
+
+        vec3 color = vec3(0.0);
+        for(int j = 0; j < 3; j++){
+          for(int i=0; i < 5; i++){
+            color[j] += lineWidth*float(i*i) / abs(fract(t - 0.01*float(j)+float(i)*0.01)*1.0 - length(uv));        
+          }
+        }
+
+        gl_FragColor = vec4(color[2],color[1],color[0],1.0);
+      }
+    `
+
+    // Create material
+    const material = new THREE.ShaderMaterial({
+      uniforms: uniforms,
+      vertexShader: vertexShader,
+      fragmentShader: fragmentShader,
+    })
+
+    // Create mesh and add to scene
+    const mesh = new THREE.Mesh(geometry, material)
+    scene.add(mesh)
+
+    // Initialize renderer
+    const renderer = new THREE.WebGLRenderer()
+    renderer.setPixelRatio(window.devicePixelRatio)
+    container.appendChild(renderer.domElement)
+
+    // Store references
+    sceneRef.current = {
+      camera,
+      scene,
+      renderer,
+      uniforms,
+      animationId: null,
+    }
+
+    // Handle resize
+    const onWindowResize = () => {
+      const rect = container.getBoundingClientRect()
+      renderer.setSize(rect.width, rect.height)
+      uniforms.resolution.value.x = renderer.domElement.width
+      uniforms.resolution.value.y = renderer.domElement.height
+    }
+
+    onWindowResize()
+    window.addEventListener("resize", onWindowResize, false)
+
+    // Animation loop
+    const animate = () => {
+      sceneRef.current.animationId = requestAnimationFrame(animate)
+      uniforms.time.value += 0.05
+      renderer.render(scene, camera)
+    }
+
+    animate()
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="fixed inset-0 pointer-events-none z-0" 
+    />
+  )
+}
+
+
+=======================================================
+Arquivo: src\components\ui\zoom-parallax.tsx
+=======================================================
+
+'use client';
+
+import React, { useRef } from 'react';
+import { useScroll, useTransform, motion } from 'framer-motion';
+
+interface Item {
+	content: React.ReactNode;
+	initialOffset?: { x: string; y: string };
+}
+
+interface ZoomParallaxProps {
+	/** Array of items to be displayed in the parallax effect max 7 items */
+	items: Item[];
+}
+
+export function ZoomParallax({ items }: ZoomParallaxProps) {
+	const container = useRef(null);
+	const { scrollYProgress } = useScroll({
+		target: container,
+		offset: ['start start', 'end end'],
+	});
+
+	return (
+		<div ref={container} className="relative h-[300vh]">
+			<div className="sticky top-0 h-screen overflow-hidden">
+				{items.map(({ content, initialOffset }, index) => {
+					// Define the active scroll range for this item, normalized to [0, 1]
+					const start = index / (items.length + 1);
+					const end = (index + 2) / (items.length + 1);
+
+					const scale = useTransform(scrollYProgress, [start, end], [0.5, 2]);
+					const opacity = useTransform(scrollYProgress, [start, start + 0.05, end - 0.05, end], [0, 1, 1, 0]);
+					const x = useTransform(scrollYProgress, [start, end], [initialOffset?.x || '0vw', '0vw']);
+					const y = useTransform(scrollYProgress, [start, end], [initialOffset?.y || '0vh', '0vh']);
+
+					return (
+						<motion.div
+							key={index}
+							style={{ scale, x, y, opacity }}
+							className="absolute top-0 flex h-full w-full items-center justify-center"
+						>
+							<div className="relative h-[30vh] w-[30vw] md:h-[25vh] md:w-[25vw]">
+								{content}
+							</div>
+						</motion.div>
+					);
+				})}
+			</div>
+		</div>
+	);
+}
+
+
+=======================================================
+Arquivo: src\components\ZoomParallaxDemo.tsx
+=======================================================
+
+'use client';
+import React from 'react';
+import { cn } from '@/lib/utils';
+import { ZoomParallax } from "@/components/ui/zoom-parallax";
+import { TrendingUp, DollarSign, Users, BarChart3, Rocket, Target, Zap } from 'lucide-react';
+
+export default function ZoomParallaxDemo() {
+	const items = [
+		{
+			initialOffset: { x: '-20vw', y: '-20vh' },
+			content: (
+				<div className="bg-white/5 backdrop-blur-md border border-white/10 shadow-xl p-6 rounded-2xl h-full flex flex-col justify-center items-center text-center">
+					<BarChart3 className="w-16 h-16 text-emerald-400 mb-4" />
+					<h3 className="text-white font-bold text-lg">Relatórios Incríveis</h3>
+					<p className="text-zinc-300 text-xs">Dados em tempo real</p>
+				</div>
+			),
+		},
+		{
+			initialOffset: { x: '20vw', y: '-20vh' },
+			content: (
+				<div className="bg-white/5 backdrop-blur-md border border-white/10 shadow-xl p-6 rounded-2xl h-full flex flex-col justify-center items-center text-center">
+					<Rocket className="w-16 h-16 text-emerald-400 mb-4" />
+					<h3 className="text-white font-bold text-lg">Crescimento 300%</h3>
+					<p className="text-zinc-300 text-xs">Escala acelerada</p>
+				</div>
+			),
+		},
+		{
+			initialOffset: { x: '-20vw', y: '20vh' },
+			content: (
+				<div className="bg-white/5 backdrop-blur-md border border-white/10 shadow-xl p-6 rounded-2xl h-full flex flex-col justify-center items-center text-center">
+					<DollarSign className="w-16 h-16 text-yellow-400 mb-4" />
+					<h3 className="text-white font-bold text-lg">Lucro Líquido</h3>
+					<p className="text-zinc-300 text-xs">ROI otimizado</p>
+				</div>
+			),
+		},
+		{
+			initialOffset: { x: '20vw', y: '20vh' },
+			content: (
+				<div className="bg-white/5 backdrop-blur-md border border-white/10 shadow-xl p-6 rounded-2xl h-full flex flex-col justify-center items-center text-center">
+					<TrendingUp className="w-16 h-16 text-blue-400 mb-4" />
+					<h3 className="text-white font-bold text-lg">Métricas de Elite</h3>
+					<p className="text-zinc-300 text-xs">Performance superior</p>
+				</div>
+			),
+		},
+		{
+			initialOffset: { x: '-25vw', y: '0vh' },
+			content: (
+				<div className="bg-white/5 backdrop-blur-md border border-white/10 shadow-xl p-6 rounded-2xl h-full flex flex-col justify-center items-center text-center">
+					<Target className="w-16 h-16 text-emerald-400 mb-4" />
+					<h3 className="text-white font-bold text-lg">Foco em Conversão</h3>
+					<p className="text-zinc-300 text-xs">Resultados garantidos</p>
+				</div>
+			),
+		},
+		{
+			initialOffset: { x: '25vw', y: '0vh' },
+			content: (
+				<div className="bg-white/5 backdrop-blur-md border border-white/10 shadow-xl p-6 rounded-2xl h-full flex flex-col justify-center items-center text-center">
+					<Users className="w-16 h-16 text-purple-400 mb-4" />
+					<h3 className="text-white font-bold text-lg">Retenção de Elite</h3>
+					<p className="text-zinc-300 text-xs">Clientes fiéis</p>
+				</div>
+			),
+		},
+		{
+			initialOffset: { x: '0vw', y: '0vh' },
+			content: (
+				<div className="bg-white/5 backdrop-blur-md border border-white/10 shadow-xl p-6 rounded-2xl h-full flex flex-col justify-center items-center text-center">
+					<Zap className="w-16 h-16 text-orange-400 mb-4" />
+					<h3 className="text-white font-bold text-lg">Alta Performance</h3>
+					<p className="text-zinc-300 text-xs">Velocidade e escala</p>
+				</div>
+			),
+		},
+	];
+
+	return (
+		<main className="w-full">
+            <div className="py-12 text-center">
+                <h2 className="text-3xl md:text-4xl font-light tracking-tighter mb-4 font-serif">
+                    A Engrenagem do <span className="italic text-zinc-500 font-bold">Tráfego Pago</span>
+                </h2>
+                <p className="text-zinc-500 text-sm md:text-base max-w-xl mx-auto">
+                    Do funil de conversão à escala de operações de elite: cada etapa desenhada para maximizar seu ROI e garantir contratos fechados diariamente.
+                </p>
+            </div>
+			<ZoomParallax items={items} />
+		</main>
+	);
+}
+
+
+=======================================================
+Arquivo: src\index.css
+=======================================================
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,500;1,600;1,700;1,800;1,900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-background: hsl(0 0% 100%);
+  --color-foreground: hsl(240 10% 3.9%);
+  --color-card: hsl(0 0% 100%);
+  --color-card-foreground: hsl(240 10% 3.9%);
+  --color-popover: hsl(0 0% 100%);
+  --color-popover-foreground: hsl(240 10% 3.9%);
+  --color-primary: hsl(240 5.9% 10%);
+  --color-primary-foreground: hsl(0 0% 98%);
+  --color-secondary: hsl(240 4.8% 95.9%);
+  --color-secondary-foreground: hsl(240 5.9% 10%);
+  --color-muted: hsl(240 4.8% 95.9%);
+  --color-muted-foreground: hsl(240 3.8% 46.1%);
+  --color-accent: hsl(240 4.8% 95.9%);
+  --color-accent-foreground: hsl(240 5.9% 10%);
+  --color-destructive: hsl(0 84.2% 60.2%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+  --color-border: hsl(240 5.9% 90%);
+  --color-input: hsl(240 5.9% 90%);
+  --color-ring: hsl(240 10% 3.9%);
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  
+  body {
+    @apply antialiased;
+  }
+}
+
+/* ========== CUSTOM SCROLLBAR ========== */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+::-webkit-scrollbar-thumb {
+  background: #10b981;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #34d399;
+}
+
+/* ========== PREMIUM ANIMATIONS ========== */
+
+/* Pulse */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Ping */
+@keyframes ping {
+  75%, 100% { transform: scale(2); opacity: 0; }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-ping {
+  animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Shimmer Effect */
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(16, 185, 129, 0.15) 25%,
+    rgba(16, 185, 129, 0.3) 50%,
+    rgba(16, 185, 129, 0.15) 75%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+/* Glow Pulse */
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(16, 185, 129, 0.2), 0 0 60px rgba(16, 185, 129, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 40px rgba(16, 185, 129, 0.4), 0 0 120px rgba(16, 185, 129, 0.2);
+  }
+}
+
+.animate-glow-pulse {
+  animation: glowPulse 3s ease-in-out infinite;
+}
+
+/* Text Gradient Animation */
+@keyframes gradientShift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+.text-gradient-animated {
+  background: linear-gradient(
+    135deg,
+    #10b981 0%,
+    #34d399 25%,
+    #6ee7b7 50%,
+    #34d399 75%,
+    #10b981 100%
+  );
+  background-size: 300% 300%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: gradientShift 4s ease infinite;
+}
+
+.text-gradient-white {
+  background: linear-gradient(
+    135deg,
+    #ffffff 0%,
+    #e4e4e7 30%,
+    #ffffff 60%,
+    #d4d4d8 100%
+  );
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: gradientShift 6s ease infinite;
+}
+
+/* Float Animation */
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-20px); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-float-delayed {
+  animation: float 6s ease-in-out 2s infinite;
+}
+
+.animate-float-slow {
+  animation: float 8s ease-in-out infinite;
+}
+
+/* Marquee */
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-marquee {
+  animation: marquee 25s linear infinite;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+
+/* Border Glow */
+@keyframes borderGlow {
+  0%, 100% { border-color: rgba(16, 185, 129, 0.2); }
+  50% { border-color: rgba(16, 185, 129, 0.6); }
+}
+
+.animate-border-glow {
+  animation: borderGlow 3s ease-in-out infinite;
+}
+
+/* Rotate Gradient */
+@keyframes rotateGradient {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.animate-rotate-gradient {
+  animation: rotateGradient 8s linear infinite;
+}
+
+/* Scale Breathe */
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+.animate-breathe {
+  animation: breathe 4s ease-in-out infinite;
+}
+
+/* Sparkle */
+@keyframes sparkle {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.2); }
+}
+
+.animate-sparkle {
+  animation: sparkle 1.5s ease-in-out infinite;
+}
+
+/* Slide Up Reveal */
+@keyframes slideUpReveal {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* Orb float */
+@keyframes orbFloat {
+  0% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(30px, -50px) scale(1.1); }
+  50% { transform: translate(-20px, -100px) scale(0.95); }
+  75% { transform: translate(40px, -50px) scale(1.05); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+/* Number Ticker */
+@keyframes numberTick {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+/* ========== GLASSMORPHISM ========== */
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-strong {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.glass-emerald {
+  background: rgba(16, 185, 129, 0.05);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(16, 185, 129, 0.15);
+}
+
+/* ========== 3D CARD HOVER ========== */
+.card-3d {
+  transform-style: preserve-3d;
+  transition: transform 0.6s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.card-3d:hover {
+  transform: perspective(1000px) rotateY(-5deg) rotateX(5deg) scale(1.02);
+}
+
+.card-3d-content {
+  transform: translateZ(20px);
+}
+
+/* ========== MAGNETIC BUTTON ========== */
+.btn-magnetic {
+  position: relative;
+  overflow: hidden;
+  transition: all 0.5s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.btn-magnetic::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  background: conic-gradient(
+    from 0deg,
+    #10b981,
+    #34d399,
+    #6ee7b7,
+    #34d399,
+    #10b981
+  );
+  border-radius: inherit;
+  z-index: -1;
+  animation: rotateGradient 4s linear infinite;
+  opacity: 0;
+  transition: opacity 0.5s;
+}
+
+.btn-magnetic:hover::before {
+  opacity: 1;
+}
+
+.btn-magnetic::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  background: #0a0a0a;
+  border-radius: inherit;
+  z-index: -1;
+}
+
+/* CTA Button Shine */
+.btn-shine {
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-shine::after {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: linear-gradient(
+    45deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 60%
+  );
+  transform: translateX(-100%);
+  transition: none;
+}
+
+.btn-shine:hover::after {
+  transform: translateX(100%);
+  transition: transform 0.8s ease;
+}
+
+/* ========== GLOW EFFECTS ========== */
+.glow-emerald {
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.15),
+              0 0 60px rgba(16, 185, 129, 0.1),
+              0 0 100px rgba(16, 185, 129, 0.05);
+}
+
+.glow-emerald-strong {
+  box-shadow: 0 0 30px rgba(16, 185, 129, 0.3),
+              0 0 80px rgba(16, 185, 129, 0.15),
+              0 0 150px rgba(16, 185, 129, 0.08);
+}
+
+.text-glow {
+  text-shadow: 0 0 20px rgba(16, 185, 129, 0.5),
+               0 0 40px rgba(16, 185, 129, 0.3),
+               0 0 80px rgba(16, 185, 129, 0.15);
+}
+
+.text-glow-white {
+  text-shadow: 0 0 30px rgba(255, 255, 255, 0.3),
+               0 0 60px rgba(255, 255, 255, 0.1);
+}
+
+/* ========== GRID PATTERN ========== */
+.bg-grid-pattern {
+  background-image: 
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+.bg-radial-gradient {
+  background: radial-gradient(ellipse at center, rgba(16, 185, 129, 0.08) 0%, transparent 70%);
+}
+
+/* ========== TRANSITIONS ========== */
+.transition-all {
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.duration-300 { transition-duration: 300ms; }
+.duration-500 { transition-duration: 500ms; }
+.duration-700 { transition-duration: 700ms; }
+.duration-1000 { transition-duration: 1000ms; }
+
+/* Backdrop blur */
+.backdrop-blur-lg { backdrop-filter: blur(16px); }
+
+/* Custom gradients */
+.bg-gradient-orbital {
+  background: linear-gradient(to bottom right, #6366f1, #3b82f6, #14b8a6);
+}
+
+/* Z-index utilities */
+.z-10 { z-index: 10; }
+.z-50 { z-index: 50; }
+
+/* Custom shadows */
+.shadow-orbital {
+  box-shadow: 0 0 15px rgba(255, 255, 255, 0.1);
+}
+
+/* Custom transforms */
+.scale-125 { transform: scale(1.25); }
+.scale-150 { transform: scale(1.5); }
+
+/* Custom opacity values */
+.opacity-70 { opacity: 0.7; }
+.opacity-50 { opacity: 0.5; }
+
+/* Custom border opacity */
+.border-white\/10 { border-color: rgba(255, 255, 255, 0.1); }
+.border-white\/20 { border-color: rgba(255, 255, 255, 0.2); }
+.border-white\/30 { border-color: rgba(255, 255, 255, 0.3); }
+.border-white\/40 { border-color: rgba(255, 255, 255, 0.4); }
+
+/* Custom background opacity */
+.bg-black\/90 { background-color: rgba(0, 0, 0, 0.9); }
+.bg-white\/50 { background-color: rgba(255, 255, 255, 0.5); }
+.bg-white\/80 { background-color: rgba(255, 255, 255, 0.8); }
+
+/* Custom text opacity */
+.text-white\/70 { color: rgba(255, 255, 255, 0.7); }
+.text-white\/80 { color: rgba(255, 255, 255, 0.8); }
+
+/* ========== HIDE SCROLLBAR UTILITY ========== */
+.hide-scrollbar::-webkit-scrollbar { display: none; }
+.hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ========== NOISE TEXTURE OVERLAY ========== */
+.noise-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ========== PREMIUM HOVER LINE ========== */
+.hover-line {
+  position: relative;
+}
+
+.hover-line::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 0;
+  height: 1px;
+  background: #10b981;
+  transition: width 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.hover-line:hover::after {
+  width: 100%;
+}
+
+/* ========== STAGGER CHILDREN ========== */
+.stagger-children > * {
+  opacity: 0;
+  animation: slideUpReveal 0.6s ease forwards;
+}
+
+.stagger-children > *:nth-child(1) { animation-delay: 0.1s; }
+.stagger-children > *:nth-child(2) { animation-delay: 0.2s; }
+.stagger-children > *:nth-child(3) { animation-delay: 0.3s; }
+.stagger-children > *:nth-child(4) { animation-delay: 0.4s; }
+.stagger-children > *:nth-child(5) { animation-delay: 0.5s; }
+.stagger-children > *:nth-child(6) { animation-delay: 0.6s; }
+
+
+=======================================================
+Arquivo: src\lib\utils.ts
+=======================================================
+
+import { clsx, type ClassValue } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+
+=======================================================
+Arquivo: src\main.tsx
+=======================================================
+
+import {StrictMode} from 'react';
+import {createRoot} from 'react-dom/client';
+import App from './App.tsx';
+import './index.css';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
+
+
+=======================================================
+Arquivo: test-env.js
+=======================================================
+
+import dotenv from 'dotenv';
+dotenv.config();
+
+console.log("URL:", process.env.SUPABASE_URL ? "Set" : "Missing");
+console.log("KEY:", process.env.SUPABASE_ANON_KEY ? "Set" : "Missing");
+
+
+=======================================================
+Arquivo: test-supabase.js
+=======================================================
+
+import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
+
+console.log('URL:', supabaseUrl ? 'Set' : 'Missing');
+console.log('Key:', supabaseKey ? 'Set' : 'Missing');
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+async function test() {
+  const { data, error } = await supabase.from('clients').select('*');
+  console.log('Clients:', data);
+  console.log('Error:', error);
+}
+
+test();
+
+
+=======================================================
+Arquivo: tsconfig.json
+=======================================================
+
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "module": "ESNext",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    },
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  }
+}
+
+
+=======================================================
+Arquivo: vercel.json
+=======================================================
+
+{
+  "rewrites": [
+    {
+      "source": "/api/leads/:id",
+      "destination": "/api/leads?id=:id"
+    },
+    {
+      "source": "/api/clients/:id",
+      "destination": "/api/clients?id=:id"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
+
+
+=======================================================
+Arquivo: vite.config.ts
+=======================================================
+
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import {defineConfig, loadEnv} from 'vite';
+
+export default defineConfig(({mode}) => {
+  const env = loadEnv(mode, '.', '');
+  return {
+    plugins: [react(), tailwindcss()],
+    define: {
+      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+    },
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      // HMR is disabled in AI Studio via DISABLE_HMR env var.
+      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      hmr: process.env.DISABLE_HMR !== 'true',
+    },
+  };
+});

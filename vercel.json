@@ -1,0 +1,20 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/leads/:id",
+      "destination": "/api/leads?id=:id"
+    },
+    {
+      "source": "/api/clients/:id",
+      "destination": "/api/clients?id=:id"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
